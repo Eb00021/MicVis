@@ -4,9 +4,8 @@ classdef MicVisualizer < matlab.apps.AppBase
         MainPanel               matlab.ui.container.Panel
         VisualizerPanel         matlab.ui.container.Panel
         ControlPanel            matlab.ui.container.Panel
-        NumMicsSpinner          matlab.ui.control.Spinner
-        NumMicsLabel            matlab.ui.control.Label
         StartButton             matlab.ui.control.Button
+        PauseButton             matlab.ui.control.Button
         StopButton              matlab.ui.control.Button
         FullscreenButton        matlab.ui.control.Button
         MicAxes                 matlab.ui.control.UIAxes
@@ -24,10 +23,21 @@ classdef MicVisualizer < matlab.apps.AppBase
         YAxisRangeSlider        matlab.ui.control.Slider
         YAxisRangeLabel         matlab.ui.control.Label
         YAxisRangeValueLabel    matlab.ui.control.Label
+        AutoRangeButton         matlab.ui.control.Button
         SampleRateLabel         matlab.ui.control.Label
         SampleRateSpinner       matlab.ui.control.Spinner
         SelectInputsButton       matlab.ui.control.Button
-        SplitGraphsButton         matlab.ui.control.Button
+        LineColorsButton          matlab.ui.control.Button
+        ColorPickerPanel          matlab.ui.container.Panel
+        ColorPreviewBox           matlab.ui.control.Label
+        ChannelDropdown           matlab.ui.control.DropDown
+        ColorRedSlider            matlab.ui.control.Slider
+        ColorGreenSlider          matlab.ui.control.Slider
+        ColorBlueSlider           matlab.ui.control.Slider
+        ColorRedLabel             matlab.ui.control.Label
+        ColorGreenLabel           matlab.ui.control.Label
+        ColorBlueLabel            matlab.ui.control.Label
+        ApplyColorButton          matlab.ui.control.Button
     end
     
     properties (Access = private)
@@ -39,15 +49,17 @@ classdef MicVisualizer < matlab.apps.AppBase
         DataAcqListener
         Timer
         IsRunning = false
+        IsPaused = false
         NumMics = 1
+        NumChannels = 1
         SampleRate = 44100
         BufferSize = 4096
         SelectedDeviceIDs = []
         SelectedDeviceNames = {}
         SelectedAudioDeviceName = ''
         SelectedAudioDriver = ''
-        SplitInputs = false(16,1)
-        SplitAxes = {}
+        ChannelColors = []  % Nx3 matrix of RGB colors for each channel
+        PlotLines = {}  % Cell array of line handles for efficient updates
         AudioHistory = {}
         LegacyLastTotalSamples = 0
         LegacyNoDataCount = 0
@@ -65,6 +77,8 @@ classdef MicVisualizer < matlab.apps.AppBase
         SelectedDataAcqVendor = ''
         SelectedDataAcqDeviceId = ''
         ApplyInitialFftRange = false
+        LastWaveformData = []
+        LastFftMagnitude = []
         LogoImageOriginal = []
         LogoImageInverted = []
         LogoImageSupportsInvert = false
@@ -179,11 +193,26 @@ classdef MicVisualizer < matlab.apps.AppBase
             end
 
             app.UIFigure.CloseRequestFcn = createCallbackFcn(app, @UIFigureCloseRequest, true);
+            app.UIFigure.WindowKeyPressFcn = createCallbackFcn(app, @UIFigureKeyPress, true);
 
+            % Enable OpenGL hardware acceleration for maximum performance
             try
                 opengl('hardware');
+                % Set OpenGL software flag to false for hardware rendering
+                opengl software false;
             catch
-                warning('OpenGL hardware acceleration may not be available');
+                % Try basic hardware mode
+                try
+                    opengl hardware;
+                catch
+                    warning('OpenGL hardware acceleration may not be available');
+                end
+            end
+            
+            % Set graphics smoothing for better quality
+            try
+                set(0, 'DefaultFigureGraphicsSmoothing', 'on');
+            catch
             end
         end
 
@@ -279,6 +308,13 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.MicAxes.Title.String = 'Real-Time Audio Waveform';
             app.MicAxes.Title.Color = app.WVUGold;
             app.MicAxes.Title.FontWeight = 'bold';
+            
+            % Enable smooth line rendering
+            try
+                app.MicAxes.LineSmoothing = 'on';
+            catch
+                % LineSmoothing may not be available on all systems
+            end
         end
 
         function createControlSection(app)
@@ -290,22 +326,19 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.ControlPanel.FontName = app.AppFontName;
             app.ControlPanel.FontSize = 14;
             app.ControlPanel.FontWeight = 'bold';
-            app.ControlPanel.Position = [940 70 240 700];
+            app.ControlPanel.Position = [940 20 240 760];
 
-            % Number of Microphones Spinner
-            app.NumMicsLabel = uilabel(app.ControlPanel);
-            app.NumMicsLabel.Text = 'Number of Mics:';
-            app.NumMicsLabel.FontName = app.AppFontName;
-            app.NumMicsLabel.FontSize = 12;
-            app.NumMicsLabel.FontColor = app.WVUGold;
-            app.NumMicsLabel.Position = [20 650 140 22];
-            app.NumMicsLabel.HorizontalAlignment = 'left';
-
-            app.NumMicsSpinner = uispinner(app.ControlPanel);
-            app.NumMicsSpinner.Limits = [1 16];
-            app.NumMicsSpinner.Value = 1;
-            app.NumMicsSpinner.Position = [170 650 50 22];
-            app.NumMicsSpinner.ValueChangedFcn = createCallbackFcn(app, @NumMicsSpinnerValueChanged, true);
+            % Select Input Device Button (shows device name when selected)
+            app.SelectInputsButton = uibutton(app.ControlPanel, 'push');
+            app.SelectInputsButton.ButtonPushedFcn = createCallbackFcn(app, @SelectInputsButtonPushed, true);
+            app.SelectInputsButton.Text = 'Select Input Device';
+            app.SelectInputsButton.FontName = app.AppFontName;
+            app.SelectInputsButton.FontSize = 10;
+            app.SelectInputsButton.FontWeight = 'bold';
+            app.SelectInputsButton.BackgroundColor = app.WVUGold;
+            app.SelectInputsButton.FontColor = app.WVUBlue;
+            app.SelectInputsButton.Position = [20 700 200 32];
+            app.SelectInputsButton.Tooltip = 'Click to select audio input device';
 
             % Sample Rate Spinner
             app.SampleRateLabel = uilabel(app.ControlPanel);
@@ -313,27 +346,16 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.SampleRateLabel.FontName = app.AppFontName;
             app.SampleRateLabel.FontSize = 12;
             app.SampleRateLabel.FontColor = app.WVUGold;
-            app.SampleRateLabel.Position = [20 615 140 22];
+            app.SampleRateLabel.Position = [20 660 140 22];
             app.SampleRateLabel.HorizontalAlignment = 'left';
 
             app.SampleRateSpinner = uispinner(app.ControlPanel);
             app.SampleRateSpinner.Limits = [8000 192000];
-            app.SampleRateSpinner.Value = 44100;  % Default to 44.1kHz
+            app.SampleRateSpinner.Value = 44100;
             app.SampleRateSpinner.Step = 1000;
-            app.SampleRateSpinner.Position = [150 615 70 22];
-            app.SampleRateSpinner.ValueDisplayFormat = '%.0f';  % Display as integer, no scientific notation
+            app.SampleRateSpinner.Position = [150 660 70 22];
+            app.SampleRateSpinner.ValueDisplayFormat = '%.0f';
             app.SampleRateSpinner.ValueChangedFcn = createCallbackFcn(app, @SampleRateSpinnerValueChanged, true);
-
-            % Select Input Devices Button
-            app.SelectInputsButton = uibutton(app.ControlPanel, 'push');
-            app.SelectInputsButton.ButtonPushedFcn = createCallbackFcn(app, @SelectInputsButtonPushed, true);
-            app.SelectInputsButton.Text = 'Select Input Devices';
-            app.SelectInputsButton.FontName = app.AppFontName;
-            app.SelectInputsButton.FontSize = 11;
-            app.SelectInputsButton.FontWeight = 'bold';
-            app.SelectInputsButton.BackgroundColor = app.WVUGold;
-            app.SelectInputsButton.FontColor = app.WVUBlue;
-            app.SelectInputsButton.Position = [20 570 200 32];
 
             % Gain Slider
             app.GainLabel = uilabel(app.ControlPanel);
@@ -341,7 +363,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.GainLabel.FontName = app.AppFontName;
             app.GainLabel.FontSize = 12;
             app.GainLabel.FontColor = app.WVUGold;
-            app.GainLabel.Position = [20 520 120 22];
+            app.GainLabel.Position = [20 610 120 22];
             app.GainLabel.HorizontalAlignment = 'left';
 
             app.GainValueLabel = uilabel(app.ControlPanel);
@@ -349,23 +371,25 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.GainValueLabel.FontName = app.AppFontName;
             app.GainValueLabel.FontSize = 11;
             app.GainValueLabel.FontColor = app.WVUGold;
-            app.GainValueLabel.Position = [160 520 60 22];
+            app.GainValueLabel.Position = [160 610 60 22];
             app.GainValueLabel.HorizontalAlignment = 'right';
 
             app.GainSlider = uislider(app.ControlPanel);
-            app.GainSlider.Limits = [0.1 5];
+            app.GainSlider.Limits = [0.1 100];
             app.GainSlider.Value = 1;
-            app.GainSlider.Position = [20 505 200 3];
+            app.GainSlider.Position = [20 590 200 3];
+            app.GainSlider.MajorTicks = [];  % Remove tick labels for cleaner look
+            app.GainSlider.MinorTicks = [];
             app.GainSlider.ValueChangedFcn = createCallbackFcn(app, @GainSliderValueChanged, true);
             app.GainSlider.ValueChangingFcn = createCallbackFcn(app, @GainSliderValueChanging, true);
 
-            % Y-Axis Range Slider (constant y-limits for smoother updates)
+            % Y-Axis Range Slider
             app.YAxisRangeLabel = uilabel(app.ControlPanel);
             app.YAxisRangeLabel.Text = 'Y Range (+/-):';
             app.YAxisRangeLabel.FontName = app.AppFontName;
             app.YAxisRangeLabel.FontSize = 12;
             app.YAxisRangeLabel.FontColor = app.WVUGold;
-            app.YAxisRangeLabel.Position = [20 460 120 22];
+            app.YAxisRangeLabel.Position = [20 555 120 22];
             app.YAxisRangeLabel.HorizontalAlignment = 'left';
 
             app.YAxisRangeValueLabel = uilabel(app.ControlPanel);
@@ -373,15 +397,28 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.YAxisRangeValueLabel.FontName = app.AppFontName;
             app.YAxisRangeValueLabel.FontSize = 11;
             app.YAxisRangeValueLabel.FontColor = app.WVUGold;
-            app.YAxisRangeValueLabel.Position = [160 460 60 22];
+            app.YAxisRangeValueLabel.Position = [160 555 60 22];
             app.YAxisRangeValueLabel.HorizontalAlignment = 'right';
 
             app.YAxisRangeSlider = uislider(app.ControlPanel);
             app.YAxisRangeSlider.Limits = [0.1 5];
             app.YAxisRangeSlider.Value = 1;
-            app.YAxisRangeSlider.Position = [20 450 200 3];
+            app.YAxisRangeSlider.Position = [20 535 200 3];
+            app.YAxisRangeSlider.MajorTicks = [];  % Remove tick labels for cleaner look
+            app.YAxisRangeSlider.MinorTicks = [];
             app.YAxisRangeSlider.ValueChangedFcn = createCallbackFcn(app, @YAxisRangeSliderValueChanged, true);
             app.YAxisRangeSlider.ValueChangingFcn = createCallbackFcn(app, @YAxisRangeSliderValueChanging, true);
+
+            % Auto Range Button
+            app.AutoRangeButton = uibutton(app.ControlPanel, 'push');
+            app.AutoRangeButton.ButtonPushedFcn = createCallbackFcn(app, @AutoRangeButtonPushed, true);
+            app.AutoRangeButton.Text = 'Auto Range';
+            app.AutoRangeButton.FontName = app.AppFontName;
+            app.AutoRangeButton.FontSize = 10;
+            app.AutoRangeButton.FontWeight = 'bold';
+            app.AutoRangeButton.BackgroundColor = app.WVUGold;
+            app.AutoRangeButton.FontColor = app.WVUBlue;
+            app.AutoRangeButton.Position = [20 495 200 24];
 
             % Display Options
             app.WaveformDisplayCheckBox = uicheckbox(app.ControlPanel);
@@ -390,7 +427,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.WaveformDisplayCheckBox.FontSize = 12;
             app.WaveformDisplayCheckBox.FontColor = app.WVUGold;
             app.WaveformDisplayCheckBox.Value = true;
-            app.WaveformDisplayCheckBox.Position = [20 405 150 22];
+            app.WaveformDisplayCheckBox.Position = [20 460 150 22];
             app.WaveformDisplayCheckBox.ValueChangedFcn = createCallbackFcn(app, @DisplayOptionValueChanged, true);
 
             app.FFTDisplayCheckBox = uicheckbox(app.ControlPanel);
@@ -399,19 +436,8 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.FFTDisplayCheckBox.FontSize = 12;
             app.FFTDisplayCheckBox.FontColor = app.WVUGold;
             app.FFTDisplayCheckBox.Value = false;
-            app.FFTDisplayCheckBox.Position = [20 380 150 22];
+            app.FFTDisplayCheckBox.Position = [20 435 150 22];
             app.FFTDisplayCheckBox.ValueChangedFcn = createCallbackFcn(app, @DisplayOptionValueChanged, true);
-
-            % Split Graphs Button
-            app.SplitGraphsButton = uibutton(app.ControlPanel, 'push');
-            app.SplitGraphsButton.ButtonPushedFcn = createCallbackFcn(app, @SplitGraphsButtonPushed, true);
-            app.SplitGraphsButton.Text = 'Configure Split Graphs';
-            app.SplitGraphsButton.FontName = app.AppFontName;
-            app.SplitGraphsButton.FontSize = 11;
-            app.SplitGraphsButton.FontWeight = 'bold';
-            app.SplitGraphsButton.BackgroundColor = app.WVUGold;
-            app.SplitGraphsButton.FontColor = app.WVUBlue;
-            app.SplitGraphsButton.Position = [20 330 200 30];
 
             % Fullscreen Button
             app.FullscreenButton = uibutton(app.ControlPanel, 'push');
@@ -422,7 +448,22 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.FullscreenButton.FontWeight = 'bold';
             app.FullscreenButton.BackgroundColor = app.WVUGold;
             app.FullscreenButton.FontColor = app.WVUBlue;
-            app.FullscreenButton.Position = [20 355 200 24];
+            app.FullscreenButton.Position = [20 398 200 26];
+
+            % Line Colors Button
+            app.LineColorsButton = uibutton(app.ControlPanel, 'push');
+            app.LineColorsButton.ButtonPushedFcn = createCallbackFcn(app, @LineColorsButtonPushed, true);
+            app.LineColorsButton.Text = 'Line Colors';
+            app.LineColorsButton.FontName = app.AppFontName;
+            app.LineColorsButton.FontSize = 11;
+            app.LineColorsButton.FontWeight = 'bold';
+            app.LineColorsButton.BackgroundColor = app.WVUGold;
+            app.LineColorsButton.FontColor = app.WVUBlue;
+            app.LineColorsButton.Position = [20 366 200 26];
+            app.LineColorsButton.Tooltip = 'Change line colors for each channel';
+            
+            % Color Picker Panel (initially hidden)
+            createColorPickerPanel(app);
 
             % Start Button
             app.StartButton = uibutton(app.ControlPanel, 'push');
@@ -433,7 +474,19 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.StartButton.FontWeight = 'bold';
             app.StartButton.BackgroundColor = [0.2 0.6 0.2];
             app.StartButton.FontColor = [1 1 1];
-            app.StartButton.Position = [20 280 200 40];
+            app.StartButton.Position = [20 315 200 40];
+
+            % Pause Button (gray when not started)
+            app.PauseButton = uibutton(app.ControlPanel, 'push');
+            app.PauseButton.ButtonPushedFcn = createCallbackFcn(app, @PauseButtonPushed, true);
+            app.PauseButton.Text = 'Pause';
+            app.PauseButton.FontName = app.AppFontName;
+            app.PauseButton.FontSize = 14;
+            app.PauseButton.FontWeight = 'bold';
+            app.PauseButton.BackgroundColor = [0.5 0.5 0.5];
+            app.PauseButton.FontColor = [1 1 1];
+            app.PauseButton.Position = [20 270 200 40];
+            app.PauseButton.Enable = 'off';
 
             % Stop Button
             app.StopButton = uibutton(app.ControlPanel, 'push');
@@ -444,7 +497,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.StopButton.FontWeight = 'bold';
             app.StopButton.BackgroundColor = [0.6 0.2 0.2];
             app.StopButton.FontColor = [1 1 1];
-            app.StopButton.Position = [20 230 200 40];
+            app.StopButton.Position = [20 225 200 40];
             app.StopButton.Enable = 'off';
 
             % Status Label
@@ -453,7 +506,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.StatusLabel.FontName = app.AppFontName;
             app.StatusLabel.FontSize = 11;
             app.StatusLabel.FontColor = app.WVUGold;
-            app.StatusLabel.Position = [20 180 200 22];
+            app.StatusLabel.Position = [20 195 200 22];
             app.StatusLabel.HorizontalAlignment = 'left';
 
             % Dark Mode Toggle
@@ -462,13 +515,13 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.DarkModeLabel.FontName = app.AppFontName;
             app.DarkModeLabel.FontSize = 11;
             app.DarkModeLabel.FontColor = app.WVUGold;
-            app.DarkModeLabel.Position = [20 140 120 22];
+            app.DarkModeLabel.Position = [20 160 80 22];
             app.DarkModeLabel.HorizontalAlignment = 'left';
 
             app.DarkModeSwitch = uiswitch(app.ControlPanel, 'slider');
             app.DarkModeSwitch.Items = {'Light', 'Dark'};
             app.DarkModeSwitch.Value = 'Dark';
-            app.DarkModeSwitch.Position = [150 140 70 22];
+            app.DarkModeSwitch.Position = [110 160 70 22];
             app.DarkModeSwitch.ValueChangedFcn = createCallbackFcn(app, @DarkModeSwitchValueChanged, true);
         end
 
@@ -539,7 +592,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             end
 
             % Labels and toggles
-            labelHandles = {app.NumMicsLabel, app.SampleRateLabel, app.GainLabel, ...
+            labelHandles = {app.SampleRateLabel, app.GainLabel, ...
                 app.GainValueLabel, app.YAxisRangeLabel, app.YAxisRangeValueLabel, ...
                 app.WaveformDisplayCheckBox, app.FFTDisplayCheckBox, app.StatusLabel, ...
                 app.DarkModeLabel};
@@ -549,14 +602,6 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
             end
 
-            if ~isempty(app.NumMicsSpinner) && isvalid(app.NumMicsSpinner)
-                if isprop(app.NumMicsSpinner, 'FontColor')
-                    app.NumMicsSpinner.FontColor = colors.Text;
-                end
-                if isprop(app.NumMicsSpinner, 'BackgroundColor')
-                    app.NumMicsSpinner.BackgroundColor = colors.Panel;
-                end
-            end
             if ~isempty(app.SampleRateSpinner) && isvalid(app.SampleRateSpinner)
                 if isprop(app.SampleRateSpinner, 'FontColor')
                     app.SampleRateSpinner.FontColor = colors.Text;
@@ -594,10 +639,14 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Buttons
             app.SelectInputsButton.BackgroundColor = colors.ButtonSecondary;
             app.SelectInputsButton.FontColor = colors.ButtonSecondaryText;
-            app.SplitGraphsButton.BackgroundColor = colors.ButtonSecondary;
-            app.SplitGraphsButton.FontColor = colors.ButtonSecondaryText;
+            app.LineColorsButton.BackgroundColor = colors.ButtonSecondary;
+            app.LineColorsButton.FontColor = colors.ButtonSecondaryText;
             app.FullscreenButton.BackgroundColor = colors.ButtonSecondary;
             app.FullscreenButton.FontColor = colors.ButtonSecondaryText;
+            if ~isempty(app.AutoRangeButton) && isvalid(app.AutoRangeButton)
+                app.AutoRangeButton.BackgroundColor = colors.ButtonSecondary;
+                app.AutoRangeButton.FontColor = colors.ButtonSecondaryText;
+            end
             app.StartButton.BackgroundColor = colors.Success;
             app.StartButton.FontColor = [1 1 1];
             app.StopButton.BackgroundColor = colors.Danger;
@@ -630,9 +679,12 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Axes theme
             applyAxesTheme(app, app.MicAxes);
             applyLegendTheme(app, app.MicAxes, colors);
-            if ~isempty(app.SplitAxes)
-                for i = 1:numel(app.SplitAxes)
-                    applyAxesTheme(app, app.SplitAxes{i});
+            
+            % Color picker panel theme
+            if ~isempty(app.ColorPickerPanel) && isvalid(app.ColorPickerPanel)
+                app.ColorPickerPanel.BackgroundColor = colors.PanelAlt;
+                if isprop(app.ColorPickerPanel, 'BorderColor')
+                    app.ColorPickerPanel.BorderColor = colors.Border;
                 end
             end
         end
@@ -1150,6 +1202,27 @@ classdef MicVisualizer < matlab.apps.AppBase
             %#ok<INUSD>
             prefsPath = fullfile(tempdir, 'MicVisualizerPrefs.mat');
         end
+        
+        function updateDeviceButtonText(app)
+            % Update the Select Input Device button to show current device name
+            if isempty(app.SelectInputsButton) || ~isvalid(app.SelectInputsButton)
+                return;
+            end
+            
+            if ~isempty(app.SelectedAudioDeviceName)
+                % Truncate long device names to fit button
+                deviceName = app.SelectedAudioDeviceName;
+                maxLen = 22;
+                if length(deviceName) > maxLen
+                    deviceName = [deviceName(1:maxLen-2) '...'];
+                end
+                app.SelectInputsButton.Text = deviceName;
+                app.SelectInputsButton.Tooltip = sprintf('Current: %s\nClick to change', app.SelectedAudioDeviceName);
+            else
+                app.SelectInputsButton.Text = 'Select Input Device';
+                app.SelectInputsButton.Tooltip = 'Click to select audio input device';
+            end
+        end
 
         function loadPreferences(app)
             prefsPath = app.getPrefsFilePath();
@@ -1164,10 +1237,6 @@ classdef MicVisualizer < matlab.apps.AppBase
                 prefs = data.prefs;
                 app.IsApplyingPrefs = true;
 
-                if isfield(prefs, 'NumMics')
-                    app.NumMics = max(1, min(16, prefs.NumMics));
-                    app.NumMicsSpinner.Value = app.NumMics;
-                end
                 if isfield(prefs, 'SampleRate')
                     app.SampleRate = max(8000, min(192000, prefs.SampleRate));
                     app.SampleRateSpinner.Value = app.SampleRate;
@@ -1188,14 +1257,8 @@ classdef MicVisualizer < matlab.apps.AppBase
                     app.FFTDisplayCheckBox.Value = logical(prefs.FFTDisplay);
                 end
                 updateDisplayOptionState(app, []);
-                if isfield(prefs, 'SplitInputs')
-                    split = logical(prefs.SplitInputs(:));
-                    if length(split) ~= app.NumMics
-                        split = false(app.NumMics, 1);
-                    end
-                    app.SplitInputs = split;
-                else
-                    app.SplitInputs = false(app.NumMics, 1);
+                if isfield(prefs, 'ChannelColors') && ~isempty(prefs.ChannelColors)
+                    app.ChannelColors = prefs.ChannelColors;
                 end
                 if isfield(prefs, 'SelectedDeviceIDs')
                     app.SelectedDeviceIDs = prefs.SelectedDeviceIDs(:);
@@ -1208,6 +1271,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
                 if isfield(prefs, 'SelectedAudioDriver')
                     app.SelectedAudioDriver = char(prefs.SelectedAudioDriver);
+                end
+                if isfield(prefs, 'AudioDriver')
+                    app.SelectedAudioDriver = char(prefs.AudioDriver);
                 end
                 if isfield(prefs, 'SelectedDataAcqVendor')
                     app.SelectedDataAcqVendor = char(prefs.SelectedDataAcqVendor);
@@ -1230,18 +1296,21 @@ classdef MicVisualizer < matlab.apps.AppBase
                 % Ignore prefs load errors
             end
             app.IsApplyingPrefs = false;
+            
+            % Update the device button text with loaded device name
+            updateDeviceButtonText(app);
         end
 
         function savePreferences(app)
             prefsPath = app.getPrefsFilePath();
             try
-                prefs.NumMics = app.NumMics;
                 prefs.SampleRate = app.SampleRate;
                 prefs.Gain = app.GainSlider.Value;
                 prefs.YAxisRange = app.YAxisRangeSlider.Value;
                 prefs.WaveformDisplay = app.WaveformDisplayCheckBox.Value;
                 prefs.FFTDisplay = app.FFTDisplayCheckBox.Value;
-                prefs.SplitInputs = app.SplitInputs;
+                prefs.ChannelColors = app.ChannelColors;
+                prefs.AudioDriver = app.SelectedAudioDriver;
                 prefs.SelectedDeviceIDs = app.SelectedDeviceIDs;
                 prefs.SelectedDeviceNames = app.SelectedDeviceNames;
                 prefs.SelectedAudioDeviceName = app.SelectedAudioDeviceName;
@@ -1397,7 +1466,7 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
 
                 dq = daq(vendorName);
-                channelCount = max(1, min(app.NumMics, 16));
+                channelCount = max(1, min(app.NumChannels, 4));
                 if ~isempty(deviceId)
                     try
                         addinput(dq, deviceId, 1:channelCount, "Audio");
@@ -1424,7 +1493,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
 
                 % Initialize audio history buffers (~0.5 seconds)
-                for i = 1:app.NumMics
+                app.NumChannels = channelCount;
+                app.AudioHistory = cell(channelCount, 1);
+                for i = 1:channelCount
                     app.AudioHistory{i} = zeros(0, 1);
                 end
                 app.DataAcqNoDataCount = 0;
@@ -1433,7 +1504,7 @@ classdef MicVisualizer < matlab.apps.AppBase
                 app.DataAcqListener = addlistener(dq, "DataAvailable", ...
                     @(~, evt) onDataAcqDataAvailable(app, evt));
 
-                app.StatusLabel.Text = sprintf('Status: Ready at %d Hz (DAQ)', app.SampleRate);
+                app.StatusLabel.Text = sprintf('Status: Ready at %d Hz (%d ch, DAQ)', app.SampleRate, app.NumChannels);
             catch ME
                 app.UseDataAcq = false;
                 app.StatusLabel.Text = sprintf('Status: Error - %s', ME.message);
@@ -1468,32 +1539,17 @@ classdef MicVisualizer < matlab.apps.AppBase
                 frameData = frameData * app.GainSlider.Value;
 
                 maxHistorySamples = round(app.SampleRate * 0.5);
-                numChannels = size(frameData, 2);
-                if numChannels <= 1 && app.NumMics > 1
-                    % Duplicate single channel for multiple mic displays
-                    for micIdx = 1:app.NumMics
-                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:)];
-                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
-                        end
+                numChannels = min(size(frameData, 2), 4);
+                app.NumChannels = numChannels;
+                
+                % Store each channel in its own history buffer
+                for chIdx = 1:numChannels
+                    if length(app.AudioHistory) < chIdx
+                        app.AudioHistory{chIdx} = zeros(0, 1);
                     end
-                else
-                    channelsToUse = min(app.NumMics, numChannels);
-                    for micIdx = 1:channelsToUse
-                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:, micIdx)];
-                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
-                        end
-                    end
-                    if channelsToUse < app.NumMics && channelsToUse > 0
-                        % Duplicate last available channel for remaining displays
-                        lastChannel = frameData(:, channelsToUse);
-                        for micIdx = (channelsToUse + 1):app.NumMics
-                            app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; lastChannel];
-                            if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                                app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
-                            end
-                        end
+                    app.AudioHistory{chIdx} = [app.AudioHistory{chIdx}; frameData(:, chIdx)];
+                    if length(app.AudioHistory{chIdx}) > maxHistorySamples
+                        app.AudioHistory{chIdx} = app.AudioHistory{chIdx}(end-maxHistorySamples+1:end);
                     end
                 end
             catch
@@ -1503,7 +1559,8 @@ classdef MicVisualizer < matlab.apps.AppBase
         
         function initializeAudioToolboxReaders(app)
             % Initialize using Audio Toolbox audioDeviceReader
-            % Following MathWorks real-time audio pattern: https://www.mathworks.com/help/audio/gs/real-time-audio-in-matlab.html
+            % Auto-detects number of channels from device (up to 4 max)
+            % For multi-channel interfaces, ASIO driver is preferred
             try
                 % Clean up existing readers
                 if ~isempty(app.AudioDeviceReaders)
@@ -1518,89 +1575,146 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
                 app.AudioDeviceReaders = {};
                 
-                % Get available devices using non-blocking audiodevinfo
+                % Use the selected device and driver from preferences
                 deviceToUse = '';
                 driverToUse = '';
-                try
-                    info = audiodevinfo;
-                    inputDevices = info.input;
-                    if ~isempty(inputDevices)
-                        % Prefer selected device ID if available (from input dialog)
-                        if ~isempty(app.SelectedDeviceIDs)
-                            matchIdx = find([inputDevices.ID] == app.SelectedDeviceIDs(1), 1);
-                            if ~isempty(matchIdx)
-                                deviceToUse = inputDevices(matchIdx).Name;
+                
+                % First priority: use SelectedAudioDeviceName and SelectedAudioDriver (from dialog)
+                if ~isempty(app.SelectedAudioDeviceName)
+                    deviceToUse = app.SelectedAudioDeviceName;
+                end
+                if ~isempty(app.SelectedAudioDriver)
+                    driverToUse = app.SelectedAudioDriver;
+                end
+                
+                % Fallback: try to get device name from audiodevinfo if not set
+                if isempty(deviceToUse)
+                    try
+                        info = audiodevinfo;
+                        inputDevices = info.input;
+                        if ~isempty(inputDevices)
+                            if ~isempty(app.SelectedDeviceIDs)
+                                matchIdx = find([inputDevices.ID] == app.SelectedDeviceIDs(1), 1);
+                                if ~isempty(matchIdx)
+                                    deviceToUse = inputDevices(matchIdx).Name;
+                                end
                             end
-                        end
-                        % Fall back to selected device name or first device
-                        if isempty(deviceToUse)
-                            if ~isempty(app.SelectedAudioDeviceName)
-                                deviceToUse = app.SelectedAudioDeviceName;
-                                driverToUse = app.SelectedAudioDriver;
-                            end
-                            if ~isempty(app.SelectedDeviceNames) && length(app.SelectedDeviceNames) >= 1
-                                deviceToUse = app.SelectedDeviceNames{1};
-                            else
+                            if isempty(deviceToUse)
                                 deviceToUse = inputDevices(1).Name;
                             end
                         end
+                    catch
+                        % Will use default device
                     end
-                catch
-                    % Will use default device
                 end
                 
-                % Create audioDeviceReader following MathWorks pattern
+                % Create audioDeviceReader - try to get max channels (up to 4)
                 % Frame size: 1024 samples is standard for real-time processing
                 samplesPerFrame = 1024;
+                maxChannels = 4;
                 
-                desiredChannels = max(1, min(app.NumMics, 16));
                 reader = [];
-                try
-                    if ~isempty(deviceToUse)
-                        reader = audioDeviceReader(...
-                            'Driver', driverToUse, ...
-                            'Device', deviceToUse, ...
-                            'SampleRate', app.SampleRate, ...
-                            'SamplesPerFrame', samplesPerFrame, ...
-                            'NumChannels', desiredChannels);
-                    else
-                        reader = audioDeviceReader(...
-                            'Driver', driverToUse, ...
-                            'SampleRate', app.SampleRate, ...
-                            'SamplesPerFrame', samplesPerFrame, ...
-                            'NumChannels', desiredChannels);
-                    end
-                catch
+                actualChannels = 1;
+                usedDriver = '';
+                
+                % Drivers to try - ASIO first for multi-channel support, then others
+                driversToTry = {'ASIO', 'DirectSound', 'WASAPI', ''};
+                if ~isempty(driverToUse)
+                    % If user selected a driver, try that first
+                    driversToTry = [{driverToUse}, driversToTry];
                 end
+                
+                % Try each driver with max channels first
+                for dIdx = 1:length(driversToTry)
+                    if ~isempty(reader)
+                        break;
+                    end
+                    tryDriver = driversToTry{dIdx};
+                    
+                    % Try to create reader with up to 4 channels, fall back to fewer if needed
+                    for tryChannels = maxChannels:-1:1
+                        if ~isempty(reader)
+                            break;
+                        end
+                        try
+                            if ~isempty(deviceToUse) && ~isempty(tryDriver)
+                                reader = audioDeviceReader(...
+                                    'Driver', tryDriver, ...
+                                    'Device', deviceToUse, ...
+                                    'SampleRate', app.SampleRate, ...
+                                    'SamplesPerFrame', samplesPerFrame, ...
+                                    'NumChannels', tryChannels);
+                            elseif ~isempty(tryDriver)
+                                reader = audioDeviceReader(...
+                                    'Driver', tryDriver, ...
+                                    'SampleRate', app.SampleRate, ...
+                                    'SamplesPerFrame', samplesPerFrame, ...
+                                    'NumChannels', tryChannels);
+                            elseif ~isempty(deviceToUse)
+                                reader = audioDeviceReader(...
+                                    'Device', deviceToUse, ...
+                                    'SampleRate', app.SampleRate, ...
+                                    'SamplesPerFrame', samplesPerFrame, ...
+                                    'NumChannels', tryChannels);
+                            else
+                                reader = audioDeviceReader(...
+                                    'SampleRate', app.SampleRate, ...
+                                    'SamplesPerFrame', samplesPerFrame, ...
+                                    'NumChannels', tryChannels);
+                            end
+                            actualChannels = tryChannels;
+                            usedDriver = tryDriver;
+                        catch
+                            reader = [];
+                        end
+                    end
+                end
+                
+                % Final fallback - default device with default channels
                 if isempty(reader)
                     try
-                        if ~isempty(deviceToUse)
-                            reader = audioDeviceReader(...
-                                'Driver', driverToUse, ...
-                                'Device', deviceToUse, ...
-                                'SampleRate', app.SampleRate, ...
-                                'SamplesPerFrame', samplesPerFrame);
-                        else
-                            reader = audioDeviceReader(...
-                                'Driver', driverToUse, ...
-                                'SampleRate', app.SampleRate, ...
-                                'SamplesPerFrame', samplesPerFrame);
-                        end
-                    catch
-                        % Fallback to default device
                         reader = audioDeviceReader(...
                             'SampleRate', app.SampleRate, ...
                             'SamplesPerFrame', samplesPerFrame);
+                        actualChannels = 1;
+                        usedDriver = 'default';
+                    catch ME
+                        throw(ME);
                     end
                 end
                 
+                % Query actual channel count from reader if possible
+                try
+                    if isprop(reader, 'NumChannels')
+                        actualChannels = reader.NumChannels;
+                    end
+                catch
+                    % Keep the value we set
+                end
+                
+                % Store selected driver for future use
+                if ~isempty(usedDriver) && ~strcmp(usedDriver, 'default')
+                    app.SelectedAudioDriver = usedDriver;
+                end
+                
                 app.AudioDeviceReaders{1} = reader;
+                app.NumChannels = actualChannels;
+                
+                % Ensure ChannelColors array is sized correctly
+                initializeChannelColors(app, actualChannels);
+                
                 % Initialize audio history buffers (keep ~0.5 seconds for display)
-                maxHistorySamples = round(app.SampleRate * 0.5);
-                for i = 1:app.NumMics
+                app.AudioHistory = cell(actualChannels, 1);
+                for i = 1:actualChannels
                     app.AudioHistory{i} = zeros(0, 1);  % Initialize empty
                 end
-                app.StatusLabel.Text = sprintf('Status: Ready at %d Hz', app.SampleRate);
+                
+                % Show driver info in status
+                if ~isempty(usedDriver) && ~strcmp(usedDriver, 'default')
+                    app.StatusLabel.Text = sprintf('Status: Ready %d ch @ %d Hz (%s)', actualChannels, app.SampleRate, usedDriver);
+                else
+                    app.StatusLabel.Text = sprintf('Status: Ready %d ch @ %d Hz', actualChannels, app.SampleRate);
+                end
                 
             catch ME
                 errorMsg = ME.message;
@@ -1670,14 +1784,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                     % This is a Windows limitation - multiple recorders cause timeouts
                 end
                 
-                % Update status with device info
-                if length(app.AudioRecorders) == app.NumMics
-                    app.StatusLabel.Text = sprintf('Status: Initialized %d microphone(s) at %d Hz', ...
-                        length(app.AudioRecorders), app.SampleRate);
-                else
-                    app.StatusLabel.Text = sprintf('Status: Initialized %d microphone(s) (requested %d)', ...
-                        length(app.AudioRecorders), app.NumMics);
-                end
+                % Update status with device info (legacy mode supports 1 channel)
+                app.NumChannels = 1;
+                app.StatusLabel.Text = sprintf('Status: Ready at %d Hz (legacy mode)', app.SampleRate);
 
                 % Reset legacy tracking counters after init
                 app.LegacyLastTotalSamples = 0;
@@ -1802,7 +1911,11 @@ classdef MicVisualizer < matlab.apps.AppBase
                 % Update UI immediately
                 app.StartButton.Enable = 'off';
                 app.StopButton.Enable = 'on';
-            setControlsForRunning(app, true);
+                app.PauseButton.Enable = 'on';
+                app.PauseButton.BackgroundColor = [0.6 0.6 0.2];  % Yellow-ish when active
+                app.PauseButton.Text = 'Pause';
+                app.IsPaused = false;
+                setControlsForRunning(app, true);
                 drawnow; % Allow UI to update before starting timer
                 
                 % Create timer for real-time visualization
@@ -1810,10 +1923,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                 warning('off', 'MATLAB:audiorecorder:timeout');
                 warning('off', 'matlabshared:asyncio:timeout');
                 
-                % Timer period: update at ~25 FPS for smoother visualization
-                % For audioDeviceReader with 1024 samples at 48kHz: ~21ms per frame
-                % Timer at 40ms balances smoothness and missed frames
-                timerPeriod = 0.04;  % 40ms = 25 FPS
+                % Timer period: update at ~60 FPS for smooth visualization
+                % Using OpenGL hardware acceleration for performance
+                timerPeriod = 0.0167;  % ~16.7ms = 60 FPS
                 
                 app.Timer = timer('ExecutionMode', 'fixedRate', ...
                     'Period', timerPeriod, ...
@@ -1847,6 +1959,12 @@ classdef MicVisualizer < matlab.apps.AppBase
                 if isvalid(app.StopButton)
                     app.StopButton.Enable = 'off';
                 end
+                if ~isempty(app.PauseButton) && isvalid(app.PauseButton)
+                    app.PauseButton.Enable = 'off';
+                    app.PauseButton.BackgroundColor = [0.5 0.5 0.5];  % Gray when disabled
+                    app.PauseButton.Text = 'Pause';
+                end
+                app.IsPaused = false;
                 if isvalid(app.StatusLabel)
                     app.StatusLabel.Text = 'Status: Stopped';
                 end
@@ -1857,11 +1975,11 @@ classdef MicVisualizer < matlab.apps.AppBase
             catch
             end
             
-            % Clear axes and cleanup split axes
+            % Clear axes and reset plot lines
             try
                 if isvalid(app.MicAxes)
                     cla(app.MicAxes);
-                    cleanupSplitAxes(app);
+                    app.PlotLines = {};
                     app.MicAxes.Visible = 'on';
                 end
             catch
@@ -1950,8 +2068,22 @@ classdef MicVisualizer < matlab.apps.AppBase
                 newXMin = xMin;
                 newXMax = xMax;
             else
-                newXMin = currentXLim(1) + (xMin - currentXLim(1)) * app.SmoothingFactor;
-                newXMax = currentXLim(2) + (xMax - currentXLim(2)) * app.SmoothingFactor;
+                currentRange = currentXLim(2) - currentXLim(1);
+                targetRange = xMax - xMin;
+                if currentRange <= 0 || targetRange <= 0
+                    newXMin = xMin;
+                    newXMax = xMax;
+                else
+                    rangeRatio = currentRange / targetRange;
+                    if rangeRatio > 5 || rangeRatio < 0.2
+                        % Snap when switching between FFT and waveform ranges
+                        newXMin = xMin;
+                        newXMax = xMax;
+                    else
+                        newXMin = currentXLim(1) + (xMin - currentXLim(1)) * app.SmoothingFactor;
+                        newXMax = currentXLim(2) + (xMax - currentXLim(2)) * app.SmoothingFactor;
+                    end
+                end
             end
             
             % Apply limits
@@ -1988,8 +2120,22 @@ classdef MicVisualizer < matlab.apps.AppBase
                 newXMin = xMin;
                 newXMax = xMax;
             else
-                newXMin = currentXLim(1) + (xMin - currentXLim(1)) * app.SmoothingFactor;
-                newXMax = currentXLim(2) + (xMax - currentXLim(2)) * app.SmoothingFactor;
+                currentRange = currentXLim(2) - currentXLim(1);
+                targetRange = xMax - xMin;
+                if currentRange <= 0 || targetRange <= 0
+                    newXMin = xMin;
+                    newXMax = xMax;
+                else
+                    rangeRatio = currentRange / targetRange;
+                    if rangeRatio > 5 || rangeRatio < 0.2
+                        % Snap when switching between waveform and FFT ranges
+                        newXMin = xMin;
+                        newXMax = xMax;
+                    else
+                        newXMin = currentXLim(1) + (xMin - currentXLim(1)) * app.SmoothingFactor;
+                        newXMax = currentXLim(2) + (xMax - currentXLim(2)) * app.SmoothingFactor;
+                    end
+                end
             end
             
             % Apply limits
@@ -2002,6 +2148,11 @@ classdef MicVisualizer < matlab.apps.AppBase
                 return;
             end
             
+            % Skip rendering when paused (but keep collecting data)
+            if app.IsPaused
+                return;
+            end
+
             % Suppress ALL warnings to prevent timeout error spam
             warning('off', 'all');
             
@@ -2015,21 +2166,22 @@ classdef MicVisualizer < matlab.apps.AppBase
                     % DAQ method - use rolling history populated by listener
                     if ~isempty(app.AudioHistory) && ~isempty(app.AudioHistory{1})
                         app.DataAcqNoDataCount = 0;
-                        if app.NumMics == 1
+                        numCh = min(length(app.AudioHistory), app.NumChannels);
+                        if numCh == 1
                             audioData = app.AudioHistory{1}(:);
                         else
                             minLen = length(app.AudioHistory{1});
-                            for micIdx = 2:app.NumMics
-                                if length(app.AudioHistory{micIdx}) < minLen
-                                    minLen = length(app.AudioHistory{micIdx});
+                            for chIdx = 2:numCh
+                                if length(app.AudioHistory{chIdx}) < minLen
+                                    minLen = length(app.AudioHistory{chIdx});
                                 end
                             end
-                            audioData = zeros(minLen, app.NumMics);
-                            for micIdx = 1:app.NumMics
-                                audioData(:, micIdx) = app.AudioHistory{micIdx}(1:minLen);
+                            audioData = zeros(minLen, numCh);
+                            for chIdx = 1:numCh
+                                audioData(:, chIdx) = app.AudioHistory{chIdx}(1:minLen);
                             end
                         end
-                        timeData = (0:length(audioData)-1) / app.SampleRate;
+                        timeData = (0:size(audioData, 1)-1) / app.SampleRate;
                     else
                         app.DataAcqNoDataCount = app.DataAcqNoDataCount + 1;
                         if app.DataAcqNoDataCount >= app.DataAcqMaxNoDataFrames
@@ -2053,54 +2205,39 @@ classdef MicVisualizer < matlab.apps.AppBase
                                 
                                 % Accumulate in rolling history (keep ~0.5 seconds)
                                 maxHistorySamples = round(app.SampleRate * 0.5);
-                                numChannels = size(frameData, 2);
-                                if numChannels <= 1 && app.NumMics > 1
-                                    % Duplicate single channel for multiple mic displays
-                                    for micIdx = 1:app.NumMics
-                                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:)];
-                                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
-                                        end
+                                numChannels = min(size(frameData, 2), 4);
+                                app.NumChannels = numChannels;
+                                
+                                % Store each channel in its own history buffer
+                                for chIdx = 1:numChannels
+                                    if length(app.AudioHistory) < chIdx
+                                        app.AudioHistory{chIdx} = zeros(0, 1);
                                     end
-                                else
-                                    channelsToUse = min(app.NumMics, numChannels);
-                                    for micIdx = 1:channelsToUse
-                                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:, micIdx)];
-                                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
-                                        end
-                                    end
-                                    if channelsToUse < app.NumMics && channelsToUse > 0
-                                        % Duplicate last available channel for remaining displays
-                                        lastChannel = frameData(:, channelsToUse);
-                                        for micIdx = (channelsToUse + 1):app.NumMics
-                                            app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; lastChannel];
-                                            if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                                                app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
-                                            end
-                                        end
+                                    app.AudioHistory{chIdx} = [app.AudioHistory{chIdx}; frameData(:, chIdx)];
+                                    if length(app.AudioHistory{chIdx}) > maxHistorySamples
+                                        app.AudioHistory{chIdx} = app.AudioHistory{chIdx}(end-maxHistorySamples+1:end);
                                     end
                                 end
                                 
                                 % Extract accumulated data for display
                                 if ~isempty(app.AudioHistory{1})
-                                    if app.NumMics == 1
+                                    if numChannels == 1
                                         audioData = app.AudioHistory{1}(:);
                                     else
-                                        % Combine all mic histories
+                                        % Combine all channel histories
                                         minLen = length(app.AudioHistory{1});
-                                        for micIdx = 2:app.NumMics
-                                            if length(app.AudioHistory{micIdx}) < minLen
-                                                minLen = length(app.AudioHistory{micIdx});
+                                        for chIdx = 2:numChannels
+                                            if length(app.AudioHistory{chIdx}) < minLen
+                                                minLen = length(app.AudioHistory{chIdx});
                                             end
                                         end
-                                        audioData = zeros(minLen, app.NumMics);
-                                        for micIdx = 1:app.NumMics
-                                            audioData(:, micIdx) = app.AudioHistory{micIdx}(1:minLen);
+                                        audioData = zeros(minLen, numChannels);
+                                        for chIdx = 1:numChannels
+                                            audioData(:, chIdx) = app.AudioHistory{chIdx}(1:minLen);
                                         end
                                     end
                                     % Create time vector
-                                    timeData = (0:length(audioData)-1) / app.SampleRate;
+                                    timeData = (0:size(audioData, 1)-1) / app.SampleRate;
                                 end
                             end
                         catch ME
@@ -2205,12 +2342,8 @@ classdef MicVisualizer < matlab.apps.AppBase
                         end
                     end
                     
-                    % If user requested multiple mics but we only have one recorder,
-                    % duplicate the data to show multiple "channels"
-                    if ~isempty(audioData) && size(audioData, 2) == 1 && app.NumMics > 1
-                        % Duplicate the single channel for display
-                        audioData = repmat(audioData, 1, min(app.NumMics, 16));
-                    end
+                    % Legacy recorder only supports 1 channel
+                    app.NumChannels = 1;
                 end
                 
                 if isempty(audioData)
@@ -2218,228 +2351,163 @@ classdef MicVisualizer < matlab.apps.AppBase
                     return;
                 end
                 
-                % Update status
+                % Update status with channel count
+                numCh = size(audioData, 2);
                 if app.UseDataAcq
-                    app.StatusLabel.Text = sprintf('Status: Running at %d Hz (DAQ)', app.SampleRate);
+                    app.StatusLabel.Text = sprintf('Status: Running %d ch @ %d Hz (DAQ)', numCh, app.SampleRate);
                 elseif app.UseAudioToolbox
-                    app.StatusLabel.Text = sprintf('Status: Running at %d Hz', app.SampleRate);
+                    app.StatusLabel.Text = sprintf('Status: Running %d ch @ %d Hz', numCh, app.SampleRate);
                 else
-                    app.StatusLabel.Text = sprintf('Status: Running (%d channel(s))', size(audioData, 2));
+                    app.StatusLabel.Text = sprintf('Status: Running %d channel(s)', numCh);
                 end
                 
                 showWaveform = app.WaveformDisplayCheckBox.Value;
                 showFFT = app.FFTDisplayCheckBox.Value;
+                numChannels = size(audioData, 2);
+                
+                % Ensure channel colors are initialized
+                if isempty(app.ChannelColors) || size(app.ChannelColors, 1) < numChannels
+                    initializeChannelColors(app, numChannels);
+                end
                 
                 % If neither is selected, clear plots and skip rendering
                 if ~showWaveform && ~showFFT
-                    if ~isempty(app.SplitAxes)
-                        for i = 1:numel(app.SplitAxes)
-                            if isvalid(app.SplitAxes{i})
-                                ax = app.SplitAxes{i};
-                                cla(ax);
-                                applyAxesTheme(app, ax);
-                                ax.Title.String = 'No display mode selected';
-                                ax.XLabel.String = '';
-                                ax.YLabel.String = '';
-                            end
-                        end
-                    end
                     cla(app.MicAxes);
                     applyAxesTheme(app, app.MicAxes);
                     app.MicAxes.Title.String = 'No display mode selected';
                     app.MicAxes.XLabel.String = '';
                     app.MicAxes.YLabel.String = '';
+                    app.PlotLines = {};
                     return;
                 end
 
+                waveformAuto = audioData - mean(audioData, 1);
+                app.LastWaveformData = waveformAuto;
                 if showWaveform
-                    waveformData = audioData - mean(audioData, 1);
+                    waveformData = waveformAuto;
                 else
                     waveformData = audioData;
                 end
                 
-                % Determine which inputs to split
-                numChannels = size(audioData, 2);
-                splitIndices = find(app.SplitInputs(1:min(numChannels, length(app.SplitInputs))));
-                combinedIndices = setdiff(1:numChannels, splitIndices);
-                numSplits = length(splitIndices);
+                % Ensure main axes are visible
+                app.MicAxes.Visible = 'on';
                 
-                % Create/update split axes if needed
-                if numSplits > 0
-                    if isempty(app.SplitAxes) || length(app.SplitAxes) ~= numSplits
-                        createSplitAxes(app, numSplits);
-                    end
-                    % Hide main axes when splits are active
-                    app.MicAxes.Visible = 'off';
-                else
-                    % Show main axes when no splits
-                    app.MicAxes.Visible = 'on';
-                    cleanupSplitAxes(app);
-                end
+                % OPTIMIZED RENDERING: Use line handle updates instead of cla/plot
+                % This dramatically improves performance for 60fps
+                needsFullRedraw = isempty(app.PlotLines) || length(app.PlotLines) ~= numChannels;
                 
-                % Plot split inputs on separate axes
-                for splitIdx = 1:numSplits
-                    channelIdx = splitIndices(splitIdx);
-                    if splitIdx <= length(app.SplitAxes) && isvalid(app.SplitAxes{splitIdx})
-                        ax = app.SplitAxes{splitIdx};
-                        cla(ax);
-                        applyAxesTheme(app, ax);
-                        hold(ax, 'on');
-                        
-                        if showWaveform
-                            plot(ax, timeData, waveformData(:, channelIdx), ...
-                                'Color', colors.Accent, 'LineWidth', 1.5);
-                            ax.YLabel.String = 'Amplitude';
-                            ax.XLabel.String = 'Time (s)';
-                            ax.Title.String = sprintf('Input %d - Waveform', channelIdx);
-                        elseif showFFT
-                            fftData = audioData(:, channelIdx);
-                            N = length(fftData);
-                            if N > 0
-                                windowed = fftData .* hann(N);
-                                Y = fft(windowed);
-                                P2 = abs(Y/N);
-                                P1 = P2(1:N/2+1);
-                                P1(2:end-1) = 2*P1(2:end-1);
-                                f = app.SampleRate*(0:(N/2))/N;
-                                maxFreq = min(8000, app.SampleRate/2);
-                                idx = f <= maxFreq;
-                                applyInitialFftRange(app, P1(idx));
-                                plot(ax, f(idx), P1(idx), 'Color', colors.Accent, 'LineWidth', 2);
-                                ax.YLabel.String = 'Magnitude';
-                                ax.XLabel.String = 'Frequency (Hz)';
-                                ax.Title.String = sprintf('Input %d - Frequency Spectrum', channelIdx);
-                            end
+                if showWaveform && ~showFFT
+                    % Waveform display - all channels on one graph
+                    if needsFullRedraw
+                        cla(app.MicAxes);
+                        applyAxesTheme(app, app.MicAxes);
+                        hold(app.MicAxes, 'on');
+                        app.PlotLines = cell(numChannels, 1);
+                        for chIdx = 1:numChannels
+                            lineColor = app.ChannelColors(chIdx, :);
+                            % Smooth lines with thicker width and anti-aliased rendering
+                            app.PlotLines{chIdx} = plot(app.MicAxes, timeData, waveformData(:, chIdx), ...
+                                'Color', [lineColor 0.85], 'LineWidth', 2.0, ...
+                                'LineStyle', '-', ...
+                                'DisplayName', sprintf('Ch %d', chIdx));
                         end
-                        hold(ax, 'off');
-                        ax.XGrid = 'on';
-                        ax.YGrid = 'on';
-                        
-                        % Apply smooth axis scaling for split axes
-                        if showWaveform
-                            updateSmoothAxisLimits(app, ax, timeData, waveformData(:, channelIdx), false);
-                        elseif showFFT
-                            fftData = audioData(:, channelIdx);
-                            N = length(fftData);
-                            if N > 0
-                                windowed = fftData .* hann(N);
-                                Y = fft(windowed);
-                                P2 = abs(Y/N);
-                                P1 = P2(1:N/2+1);
-                                P1(2:end-1) = 2*P1(2:end-1);
-                                f = app.SampleRate*(0:(N/2))/N;
-                                maxFreq = min(8000, app.SampleRate/2);
-                                idx = f <= maxFreq;
-                                updateSmoothAxisLimitsFFT(app, ax, f(idx), P1(idx));
-                            end
-                        end
-                    end
-                end
-                
-                % Plot combined inputs on main axes
-                if ~isempty(combinedIndices)
-                    cla(app.MicAxes);
-                    applyAxesTheme(app, app.MicAxes);
-                    hold(app.MicAxes, 'on');
-                    
-                    if showWaveform && ~showFFT
-                        channelColors = getChannelColors(app, length(combinedIndices));
-                        for i = 1:length(combinedIndices)
-                            chIdx = combinedIndices(i);
-                            plot(app.MicAxes, timeData, waveformData(:, chIdx), ...
-                                'Color', channelColors(i,:), 'LineWidth', 1.5, ...
-                                'DisplayName', sprintf('Mic %d', chIdx));
-                        end
-                        app.MicAxes.YLabel.String = 'Amplitude';
-                        app.MicAxes.XLabel.String = 'Time (s)';
-                        app.MicAxes.Title.String = sprintf('Combined Waveform (%d Mic(s))', length(combinedIndices));
+                        hold(app.MicAxes, 'off');
                         legend(app.MicAxes, 'show', 'Location', 'best');
                         applyLegendTheme(app, app.MicAxes, colors);
-                        
-                    elseif showFFT && ~showWaveform
-                        fftData = mean(audioData(:, combinedIndices), 2);
-                        N = length(fftData);
-                        f = [];
-                        P1 = [];
-                        if N > 0
-                            windowed = fftData .* hann(N);
-                            Y = fft(windowed);
-                            P2 = abs(Y/N);
-                            P1 = P2(1:N/2+1);
-                            P1(2:end-1) = 2*P1(2:end-1);
-                            f = app.SampleRate*(0:(N/2))/N;
-                            maxFreq = min(8000, app.SampleRate/2);
-                            idx = f <= maxFreq;
-                            applyInitialFftRange(app, P1(idx));
-                            plot(app.MicAxes, f(idx), P1(idx), ...
-                                'Color', colors.Accent, 'LineWidth', 2);
-                            app.MicAxes.YLabel.String = 'Magnitude';
-                            app.MicAxes.XLabel.String = 'Frequency (Hz)';
-                            app.MicAxes.Title.String = 'Combined Frequency Spectrum';
-                        end
-                        
-                    elseif showWaveform && showFFT
-                        channelColors = getChannelColors(app, length(combinedIndices));
-                        for i = 1:length(combinedIndices)
-                            chIdx = combinedIndices(i);
-                            plot(app.MicAxes, timeData, waveformData(:, chIdx), ...
-                                'Color', channelColors(i,:), 'LineWidth', 1.5, ...
-                                'DisplayName', sprintf('Mic %d', chIdx));
-                        end
-                        
-                        fftData = mean(audioData(:, combinedIndices), 2);
-                        N = length(fftData);
-                        if N > 0
-                            windowed = fftData .* hann(N);
-                            Y = fft(windowed);
-                            P2 = abs(Y/N);
-                            P1 = P2(1:N/2+1);
-                            P1(2:end-1) = 2*P1(2:end-1);
-                            f = app.SampleRate*(0:(N/2))/N;
-                            if length(P1) > 1
-                                [~, maxIdx] = max(P1(2:end));
-                                peakFreq = f(maxIdx + 1);
-                            else
-                                peakFreq = 0;
+                    else
+                        % Fast update: just update XData/YData
+                        for chIdx = 1:numChannels
+                            if chIdx <= length(app.PlotLines) && isvalid(app.PlotLines{chIdx})
+                                set(app.PlotLines{chIdx}, 'XData', timeData, 'YData', waveformData(:, chIdx));
+                                % Update color in case it changed
+                                set(app.PlotLines{chIdx}, 'Color', app.ChannelColors(chIdx, :));
                             end
-                            app.MicAxes.Title.String = sprintf('Combined Waveform (%d Mic(s)) - Peak: %.1f Hz', ...
-                                length(combinedIndices), peakFreq);
-                        else
-                            app.MicAxes.Title.String = sprintf('Combined Waveform (%d Mic(s))', length(combinedIndices));
                         end
-                        
-                        app.MicAxes.YLabel.String = 'Amplitude';
-                        app.MicAxes.XLabel.String = 'Time (s)';
-                        legend(app.MicAxes, 'show', 'Location', 'best');
-                        applyLegendTheme(app, app.MicAxes, colors);
                     end
-                    
-                    hold(app.MicAxes, 'off');
-                    app.MicAxes.XGrid = 'on';
-                    app.MicAxes.YGrid = 'on';
+                    app.MicAxes.YLabel.String = 'Amplitude';
+                    app.MicAxes.XLabel.String = 'Time (s)';
+                    app.MicAxes.Title.String = sprintf('Audio Waveform (%d Channel(s))', numChannels);
                     
                     % Apply smooth axis scaling
-                    if showWaveform && ~showFFT
-                        % Waveform only
-                        updateSmoothAxisLimits(app, app.MicAxes, timeData, waveformData(:, combinedIndices), false);
-                    elseif showFFT && ~showWaveform
-                        % FFT only - use pre-calculated data
-                        if ~isempty(f) && ~isempty(P1)
-                            maxFreq = min(8000, app.SampleRate/2);
-                            idx = f <= maxFreq;
-                            updateSmoothAxisLimitsFFT(app, app.MicAxes, f(idx), P1(idx));
+                    updateSmoothAxisLimits(app, app.MicAxes, timeData, waveformData, false);
+                    
+                elseif showFFT && ~showWaveform
+                    % FFT display - show each channel's spectrum
+                    N = size(audioData, 1);
+                    f = [];
+                    if N > 0
+                        f = app.SampleRate*(0:(N/2))/N;
+                        maxFreq = min(8000, app.SampleRate/2);
+                        freqIdx = f <= maxFreq;
+                        fDisplay = f(freqIdx);
+                        
+                        if needsFullRedraw || length(app.PlotLines) ~= numChannels
+                            cla(app.MicAxes);
+                            applyAxesTheme(app, app.MicAxes);
+                            hold(app.MicAxes, 'on');
+                            app.PlotLines = cell(numChannels, 1);
+                            for chIdx = 1:numChannels
+                                fftData = audioData(:, chIdx);
+                                windowed = fftData .* hann(N);
+                                Y = fft(windowed);
+                                P2 = abs(Y/N);
+                                P1 = P2(1:N/2+1);
+                                P1(2:end-1) = 2*P1(2:end-1);
+                                lineColor = app.ChannelColors(chIdx, :);
+                                % Smooth lines with thicker width and anti-aliased rendering
+                                app.PlotLines{chIdx} = plot(app.MicAxes, fDisplay, P1(freqIdx), ...
+                                    'Color', [lineColor 0.85], 'LineWidth', 2.0, ...
+                                    'LineStyle', '-', ...
+                                    'DisplayName', sprintf('Ch %d', chIdx));
+                            end
+                            hold(app.MicAxes, 'off');
+                            legend(app.MicAxes, 'show', 'Location', 'best');
+                            applyLegendTheme(app, app.MicAxes, colors);
+                        else
+                            % Fast update
+                            for chIdx = 1:numChannels
+                                if chIdx <= length(app.PlotLines) && isvalid(app.PlotLines{chIdx})
+                                    fftData = audioData(:, chIdx);
+                                    windowed = fftData .* hann(N);
+                                    Y = fft(windowed);
+                                    P2 = abs(Y/N);
+                                    P1 = P2(1:N/2+1);
+                                    P1(2:end-1) = 2*P1(2:end-1);
+                                    set(app.PlotLines{chIdx}, 'XData', fDisplay, 'YData', P1(freqIdx));
+                                    set(app.PlotLines{chIdx}, 'Color', app.ChannelColors(chIdx, :));
+                                end
+                            end
                         end
-                    elseif showWaveform && showFFT
-                        % Both - scale for waveform (FFT is just shown in title)
-                        updateSmoothAxisLimits(app, app.MicAxes, timeData, waveformData(:, combinedIndices), false);
+                        
+                        % Store last FFT for auto-range
+                        fftData = mean(audioData, 2);
+                        windowed = fftData .* hann(N);
+                        Y = fft(windowed);
+                        P2 = abs(Y/N);
+                        P1 = P2(1:N/2+1);
+                        P1(2:end-1) = 2*P1(2:end-1);
+                        app.LastFftMagnitude = P1(freqIdx);
+                        applyInitialFftRange(app, P1(freqIdx));
+                        
+                        updateSmoothAxisLimitsFFT(app, app.MicAxes, fDisplay, P1(freqIdx));
                     end
+                    
+                    app.MicAxes.YLabel.String = 'Magnitude';
+                    app.MicAxes.XLabel.String = 'Frequency (Hz)';
+                    app.MicAxes.Title.String = sprintf('Frequency Spectrum (%d Channel(s))', numChannels);
                 end
                 
-                % Force update - suppress errors
+                app.MicAxes.XGrid = 'on';
+                app.MicAxes.YGrid = 'on';
+                
+                % Force update using limitrate for 60fps performance
                 try
-                    drawnow;
+                    drawnow limitrate;
                 catch
-                    % Ignore drawnow errors (may occur during timeouts)
+                    try
+                        drawnow;
+                    catch
+                    end
                 end
                 
                 % Re-enable warnings after update (but keep timeout warnings off)
@@ -2523,62 +2591,6 @@ classdef MicVisualizer < matlab.apps.AppBase
     % Component callbacks
     methods (Access = private)
         
-        % Code that executes when component value is changed.
-        function NumMicsSpinnerValueChanged(app, event)
-            newNumMics = app.NumMicsSpinner.Value;
-
-            if app.IsApplyingPrefs
-                app.NumMics = newNumMics;
-                app.SplitInputs = false(newNumMics, 1);
-                return;
-            end
-
-            if app.IsRunning
-                app.IsApplyingPrefs = true;
-                app.NumMicsSpinner.Value = app.NumMics;
-                app.IsApplyingPrefs = false;
-                app.StatusLabel.Text = 'Status: Change will take effect after restart';
-                return;
-            end
-
-            useDaq = checkDataAcqToolbox(app);
-            hasAudioToolbox = checkAudioToolbox(app);
-            
-            % Adjust SelectedDeviceIDs array if number of mics changed
-            if ~useDaq && newNumMics ~= app.NumMics
-                if isempty(app.SelectedDeviceIDs) || length(app.SelectedDeviceIDs) < newNumMics
-                    % Extend array with default device
-                    try
-                        info = audiodevinfo;
-                        inputDevices = info.input;
-                        if ~isempty(inputDevices)
-                            defaultID = inputDevices(1).ID;
-                            if isempty(app.SelectedDeviceIDs)
-                                app.SelectedDeviceIDs = repmat(defaultID, newNumMics, 1);
-                            else
-                                app.SelectedDeviceIDs(end+1:newNumMics) = defaultID;
-                            end
-                        end
-                    catch
-                        % If we can't get devices, clear selection
-                        app.SelectedDeviceIDs = [];
-                    end
-                elseif length(app.SelectedDeviceIDs) > newNumMics
-                    % Trim array
-                    app.SelectedDeviceIDs = app.SelectedDeviceIDs(1:newNumMics);
-                end
-            end
-            
-            app.NumMics = newNumMics;
-            % Reset split inputs array if number of mics changed
-            if length(app.SplitInputs) ~= newNumMics
-                app.SplitInputs = false(newNumMics, 1);
-            end
-            initializeAudioRecorders(app);
-
-            savePreferences(app);
-        end
-        
         function SampleRateSpinnerValueChanged(app, event)
             newSampleRate = app.SampleRateSpinner.Value;
             if app.IsApplyingPrefs
@@ -2651,6 +2663,73 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.ApplyInitialFftRange = false;
         end
 
+        function yRange = applyAutoRangeFromData(app, data, multiplier)
+            yRange = [];
+            if nargin < 3 || isempty(multiplier)
+                multiplier = 1.25;
+            end
+            if isempty(data)
+                return;
+            end
+            data = data(isfinite(data));
+            if isempty(data)
+                return;
+            end
+            maxVal = max(abs(data(:)));
+            if isempty(maxVal) || maxVal <= 0
+                return;
+            end
+            if isempty(app.YAxisRangeSlider) || ~isvalid(app.YAxisRangeSlider)
+                return;
+            end
+            limits = app.YAxisRangeSlider.Limits;
+            yRange = maxVal * multiplier;
+            yRange = max(limits(1), min(limits(2), yRange));
+            app.IsApplyingPrefs = true;
+            app.YAxisRangeSlider.Value = yRange;
+            updateYAxisRangeLabel(app, yRange);
+            app.IsApplyingPrefs = false;
+            savePreferences(app);
+        end
+
+        function [yRange, gainFactor] = applyAutoRangeFftWithGain(app)
+            yRange = [];
+            gainFactor = 1;
+            if isempty(app.LastFftMagnitude)
+                return;
+            end
+            maxMag = max(abs(app.LastFftMagnitude(:)));
+            if isempty(maxMag) || ~isfinite(maxMag) || maxMag <= 0
+                return;
+            end
+            if isempty(app.YAxisRangeSlider) || ~isvalid(app.YAxisRangeSlider)
+                return;
+            end
+            if isempty(app.GainSlider) || ~isvalid(app.GainSlider)
+                return;
+            end
+
+            minRange = app.YAxisRangeSlider.Limits(1);
+            targetPeak = minRange * 0.8;
+            if maxMag < targetPeak
+                desiredGainFactor = targetPeak / maxMag;
+                currentGain = app.GainSlider.Value;
+                gainLimits = app.GainSlider.Limits;
+                newGain = currentGain * desiredGainFactor;
+                newGain = max(gainLimits(1), min(gainLimits(2), newGain));
+                gainFactor = newGain / currentGain;
+                if abs(newGain - currentGain) > 1e-3
+                    app.IsApplyingPrefs = true;
+                    app.GainSlider.Value = newGain;
+                    updateGainLabel(app, newGain);
+                    app.IsApplyingPrefs = false;
+                    savePreferences(app);
+                end
+            end
+
+            yRange = applyAutoRangeFromData(app, app.LastFftMagnitude * gainFactor, 1.2);
+        end
+
         function updateYAxisRangeLabel(app, value)
             if nargin < 2 || isempty(value)
                 value = app.YAxisRangeSlider.Value;
@@ -2669,13 +2748,16 @@ classdef MicVisualizer < matlab.apps.AppBase
                 return;
             end
             app.MicAxes.YLim = [-yRange, yRange];
-            if ~isempty(app.SplitAxes)
-                for i = 1:numel(app.SplitAxes)
-                    if ~isempty(app.SplitAxes{i}) && isvalid(app.SplitAxes{i})
-                        app.SplitAxes{i}.YLim = [-yRange, yRange];
-                    end
-                end
+        end
+
+        function applyFftYAxisLimits(app, yRange)
+            if nargin < 2 || isempty(yRange)
+                yRange = app.YAxisRangeSlider.Value;
             end
+            if isempty(app.MicAxes) || ~isvalid(app.MicAxes)
+                return;
+            end
+            app.MicAxes.YLim = [0, yRange];
         end
 
         function setControlsForRunning(app, isRunning)
@@ -2686,18 +2768,13 @@ classdef MicVisualizer < matlab.apps.AppBase
             if isRunning
                 state = 'off';
             end
-            if ~isempty(app.NumMicsSpinner) && isvalid(app.NumMicsSpinner)
-                app.NumMicsSpinner.Enable = state;
-            end
             if ~isempty(app.SampleRateSpinner) && isvalid(app.SampleRateSpinner)
                 app.SampleRateSpinner.Enable = state;
             end
             if ~isempty(app.SelectInputsButton) && isvalid(app.SelectInputsButton)
                 app.SelectInputsButton.Enable = state;
             end
-            if ~isempty(app.SplitGraphsButton) && isvalid(app.SplitGraphsButton)
-                app.SplitGraphsButton.Enable = state;
-            end
+            % LineColorsButton stays enabled always - colors can be changed anytime
         end
 
         function YAxisRangeSliderValueChanged(app, event)
@@ -2716,6 +2793,23 @@ classdef MicVisualizer < matlab.apps.AppBase
                 return;
             end
             updateYAxisRangeLabel(app, event.Value);
+        end
+
+        function AutoRangeButtonPushed(app, event)
+            %#ok<INUSD>
+            showWaveform = app.WaveformDisplayCheckBox.Value;
+            showFFT = app.FFTDisplayCheckBox.Value;
+            if showFFT && ~showWaveform
+                [yRange, ~] = applyAutoRangeFftWithGain(app);
+                if ~isempty(yRange)
+                    applyFftYAxisLimits(app, yRange);
+                end
+            else
+                yRange = applyAutoRangeFromData(app, app.LastWaveformData, 1.2);
+                if ~isempty(yRange)
+                    applyFixedYAxisLimits(app, yRange);
+                end
+            end
         end
 
         function DisplayOptionValueChanged(app, event)
@@ -2748,11 +2842,45 @@ classdef MicVisualizer < matlab.apps.AppBase
             showInputDeviceDialog(app);
         end
         
-        % Button pushed function: SplitGraphsButton
-        function SplitGraphsButtonPushed(app, event)
-            % Allow UI to update before showing dialog
-            drawnow;
-            showSplitGraphsDialog(app);
+        % Button pushed function: LineColorsButton
+        function LineColorsButtonPushed(app, event)
+            %#ok<INUSD>
+            % Toggle visibility of color picker panel
+            if strcmp(app.ColorPickerPanel.Visible, 'off')
+                % Show the color picker
+                initializeChannelColors(app, max(1, app.NumChannels));
+                updateChannelDropdownItems(app);
+                app.ColorPickerPanel.Visible = 'on';
+                app.LineColorsButton.Text = 'Hide Colors';
+            else
+                % Hide the color picker
+                app.ColorPickerPanel.Visible = 'off';
+                app.LineColorsButton.Text = 'Line Colors';
+            end
+        end
+        
+        % Dropdown value changed: ChannelDropdown
+        function ChannelDropdownValueChanged(app, event)
+            %#ok<INUSD>
+            channelStr = app.ChannelDropdown.Value;
+            channelIdx = str2double(regexp(channelStr, '\d+', 'match', 'once'));
+            if ~isnan(channelIdx) && channelIdx >= 1
+                updateColorPickerForChannel(app, channelIdx);
+            end
+        end
+        
+        % Color slider changing (real-time preview)
+        function ColorSliderChanging(app, event)
+            %#ok<INUSD>
+            updateColorPreview(app);
+            applyCurrentColor(app);
+        end
+        
+        % Color slider changed (final value)
+        function ColorSliderChanged(app, event)
+            %#ok<INUSD>
+            updateColorPreview(app);
+            applyCurrentColor(app);
         end
 
         % Button pushed function: FullscreenButton
@@ -2782,18 +2910,14 @@ classdef MicVisualizer < matlab.apps.AppBase
         
         function showInputDeviceDialog(app)
             % Create dialog figure for device selection
-            % Adjust height based on number of microphones
-            numMics = app.NumMics;
-            baseHeight = 150;
-            micHeight = 35;
-            dialogHeight = min(600, baseHeight + numMics * micHeight); % Cap at 600px
-            useDaq = checkDataAcqToolbox(app);
-            hasAudioToolbox = checkAudioToolbox(app);
+            % Simple layout: Driver dropdown, Device dropdown, OK/Cancel
             colors = getThemeColors(app);
+            hasAudioToolbox = checkAudioToolbox(app);
             
+            dialogHeight = 250;
             dialogFig = uifigure('Visible', 'off');
-            dialogFig.Position = [400 300 500 dialogHeight];
-            dialogFig.Name = 'Select Audio Input Devices';
+            dialogFig.Position = [400 300 480 dialogHeight];
+            dialogFig.Name = 'Select Audio Input Device';
             dialogFig.Color = colors.Window;
             dialogFig.Resize = 'off';
             applyDialogIcon(app, dialogFig);
@@ -2801,7 +2925,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Main panel
             mainPanel = uipanel(dialogFig);
             mainPanel.BackgroundColor = colors.PanelAlt;
-            mainPanel.Position = [10 10 480 dialogHeight-20];
+            mainPanel.Position = [10 10 460 dialogHeight-20];
             mainPanel.BorderType = 'line';
             if isprop(mainPanel, 'BorderColor')
                 mainPanel.BorderColor = colors.Border;
@@ -2809,391 +2933,156 @@ classdef MicVisualizer < matlab.apps.AppBase
             
             % Title
             titleLabel = uilabel(mainPanel);
-            titleLabel.Text = 'Select Input Device for Each Microphone';
+            titleLabel.Text = 'Audio Input Configuration';
             titleLabel.FontName = app.AppFontName;
             titleLabel.FontSize = 16;
             titleLabel.FontWeight = 'bold';
             titleLabel.FontColor = colors.Text;
-            titleLabel.Position = [20 dialogHeight-50 440 30];
+            titleLabel.Position = [20 dialogHeight-55 420 30];
             titleLabel.HorizontalAlignment = 'center';
 
-            % Note about multi-channel USB interfaces without Audio Toolbox/DAQ
-            if ~useDaq && ~hasAudioToolbox
-                noteLabel = uilabel(mainPanel);
-                noteLabel.Text = ['Audio Toolbox not detected. Multi-channel USB interfaces ' ...
-                    '(e.g., UMC404HD) may not appear without Audio Toolbox or Data Acquisition Toolbox.'];
-                noteLabel.FontName = app.AppFontName;
-                noteLabel.FontSize = 10;
-                noteLabel.FontColor = colors.TextMuted;
-                noteLabel.Position = [20 dialogHeight-105 440 40];
-                noteLabel.HorizontalAlignment = 'center';
-                noteLabel.WordWrap = 'on';
+            % Note about ASIO
+            noteLabel = uilabel(mainPanel);
+            noteLabel.Text = 'Select ASIO driver for multi-channel USB interfaces (UMC404HD, etc.)';
+            noteLabel.FontName = app.AppFontName;
+            noteLabel.FontSize = 10;
+            noteLabel.FontColor = colors.TextMuted;
+            noteLabel.Position = [20 dialogHeight-80 420 18];
+            noteLabel.HorizontalAlignment = 'center';
+
+            % Driver selection row
+            driverLabel = uilabel(mainPanel);
+            driverLabel.Text = 'Audio Driver:';
+            driverLabel.FontName = app.AppFontName;
+            driverLabel.FontSize = 12;
+            driverLabel.FontColor = colors.Text;
+            driverLabel.Position = [20 dialogHeight-115 100 22];
+            driverLabel.HorizontalAlignment = 'left';
+
+            driverDropdown = uidropdown(mainPanel);
+            driverDropdown.Items = {'ASIO (Multi-channel)', 'DirectSound', 'WASAPI', 'Auto-detect'};
+            driverDropdown.ItemsData = {'ASIO', 'DirectSound', 'WASAPI', ''};
+            driverDropdown.FontName = app.AppFontName;
+            driverDropdown.FontSize = 11;
+            driverDropdown.Position = [130 dialogHeight-115 180 22];
+            if ~isempty(app.SelectedAudioDriver)
+                try
+                    driverDropdown.Value = app.SelectedAudioDriver;
+                catch
+                    driverDropdown.Value = '';
+                end
+            else
+                driverDropdown.Value = '';
             end
-            
+
             % Refresh button
             refreshBtn = uibutton(mainPanel, 'push');
-            refreshBtn.Text = 'Refresh Devices';
+            refreshBtn.Text = 'Refresh';
             refreshBtn.FontName = app.AppFontName;
             refreshBtn.FontSize = 10;
             refreshBtn.FontWeight = 'bold';
             refreshBtn.BackgroundColor = colors.ButtonSecondary;
             refreshBtn.FontColor = colors.ButtonSecondaryText;
-            refreshBtn.Position = [20 dialogHeight-80 120 25];
+            refreshBtn.Position = [320 dialogHeight-115 100 22];
 
-            % Device summary label (updated on refresh)
-            deviceSummaryLabel = uilabel(mainPanel);
-            deviceSummaryLabel.Text = 'Detecting devices...';
-            deviceSummaryLabel.FontName = app.AppFontName;
-            deviceSummaryLabel.FontSize = 10;
-            deviceSummaryLabel.FontColor = colors.Text;
-            deviceSummaryLabel.Position = [160 dialogHeight-82 280 22];
-            deviceSummaryLabel.HorizontalAlignment = 'left';
-            
-            % Create dropdowns for each microphone (will be populated by refresh function)
-            numMics = app.NumMics;
-            dropdowns = cell(numMics, 1);
-            labels = cell(numMics, 1);
-            startY = dialogHeight - 120;
-            spacing = 35;
-            
-            % Function to refresh device list and update dropdowns
-            function refreshDeviceList()
-                inputDevices = [];
+            % Device selection row
+            deviceLabel = uilabel(mainPanel);
+            deviceLabel.Text = 'Input Device:';
+            deviceLabel.FontName = app.AppFontName;
+            deviceLabel.FontSize = 12;
+            deviceLabel.FontColor = colors.Text;
+            deviceLabel.Position = [20 dialogHeight-150 100 22];
+            deviceLabel.HorizontalAlignment = 'left';
+
+            deviceDropdown = uidropdown(mainPanel);
+            deviceDropdown.Items = {'Loading...'};
+            deviceDropdown.FontName = app.AppFontName;
+            deviceDropdown.FontSize = 11;
+            deviceDropdown.Position = [130 dialogHeight-150 290 22];
+
+            % Status label
+            statusLabel = uilabel(mainPanel);
+            statusLabel.Text = 'Detecting devices...';
+            statusLabel.FontName = app.AppFontName;
+            statusLabel.FontSize = 10;
+            statusLabel.FontColor = colors.TextMuted;
+            statusLabel.Position = [20 dialogHeight-175 420 18];
+            statusLabel.HorizontalAlignment = 'left';
+
+            % Function to refresh device list based on selected driver
+            function refreshDevices()
+                selectedDriver = driverDropdown.Value;
                 deviceNames = {};
-                deviceIDs = [];
-                deviceVendors = {};
-                deviceDrivers = {};
-                useAudioToolboxList = false;
-                useDaqList = useDaq;
-
-                if useDaq
-                    % Prefer DAQ device list when available
-                    try
-                        vendorsToTry = ["directsound", "wasapi"];
-                        for v = vendorsToTry
-                            try
-                                t = daqlist(v);
-                                if ~isempty(t)
-                                    for k = 1:height(t)
-                                        deviceNames{end+1,1} = sprintf('%s (%s:%s)', ...
-                                            t.Description(k), v, t.DeviceID(k));
-                                        deviceIDs{end+1,1} = char(t.DeviceID(k));
-                                        deviceVendors{end+1,1} = char(v);
-                                    end
+                
+                statusLabel.Text = 'Scanning for devices...';
+                drawnow;
+                
+                if hasAudioToolbox
+                    % Try the selected driver first
+                    driversToTry = {};
+                    if ~isempty(selectedDriver)
+                        driversToTry = {selectedDriver};
+                    else
+                        driversToTry = {'ASIO', 'DirectSound', 'WASAPI'};
+                    end
+                    
+                    for dIdx = 1:length(driversToTry)
+                        tryDriver = driversToTry{dIdx};
+                        try
+                            r = audioDeviceReader('Driver', tryDriver);
+                            devs = getAudioDevices(r);
+                            release(r);
+                            if ~isempty(devs)
+                                for k = 1:numel(devs)
+                                    deviceNames{end+1} = sprintf('%s (%s)', devs{k}, tryDriver);
                                 end
-                            catch
+                            end
+                        catch
+                        end
+                    end
+                end
+                
+                % Fallback to legacy audiodevinfo if no devices found
+                if isempty(deviceNames)
+                    try
+                        info = audiodevinfo;
+                        if ~isempty(info.input)
+                            for k = 1:length(info.input)
+                                deviceNames{end+1} = info.input(k).Name;
                             end
                         end
                     catch
                     end
-                    % If DAQ has no devices, fall back to Audio Toolbox list
-                    if isempty(deviceNames) && hasAudioToolbox && exist('getAudioDevices', 'file') == 2
-                        try
-                            % Prefer ASIO, then WASAPI/DirectSound
-                            driversToTry = ["ASIO", "WASAPI", "DirectSound"];
-                            for d = driversToTry
-                                try
-                                    r = audioDeviceReader('Driver', char(d));
-                                    devs = getAudioDevices(r);
-                                    release(r);
-                                    if ~isempty(devs)
-                                        for k = 1:numel(devs)
-                                            deviceNames{end+1,1} = devs{k};
-                                            deviceDrivers{end+1,1} = char(d);
-                                        end
-                                        useAudioToolboxList = true;
-                                    end
-                                catch
-                                end
-                                if useAudioToolboxList
-                                    break;
-                                end
-                            end
-                            if ~useAudioToolboxList
-                                devs = getAudioDevices;
-                                if ~isempty(devs)
-                                    deviceNames = devs(:);
-                                    deviceDrivers = repmat({''}, numel(devs), 1);
-                                    useAudioToolboxList = true;
-                                end
-                            end
-                        catch
-                            deviceNames = {};
-                        end
-                    end
-                    % If still empty, fall back to legacy list
-                    if isempty(deviceNames) && ~useAudioToolboxList
-                        try
-                            info = audiodevinfo;
-                            inputDevices = info.input;
-                        catch
-                            inputDevices = [];
-                        end
-                    end
-                else
-                    if hasAudioToolbox && exist('getAudioDevices', 'file') == 2
-                        % Audio Toolbox device list (includes multi-channel interfaces)
-                        try
-                            driversToTry = ["ASIO", "WASAPI", "DirectSound"];
-                            for d = driversToTry
-                                try
-                                    r = audioDeviceReader('Driver', char(d));
-                                    devs = getAudioDevices(r);
-                                    release(r);
-                                    if ~isempty(devs)
-                                        for k = 1:numel(devs)
-                                            deviceNames{end+1,1} = devs{k};
-                                            deviceDrivers{end+1,1} = char(d);
-                                        end
-                                        useAudioToolboxList = true;
-                                    end
-                                catch
-                                end
-                                if useAudioToolboxList
-                                    break;
-                                end
-                            end
-                            if ~useAudioToolboxList
-                                devs = getAudioDevices;
-                                if ~isempty(devs)
-                                    deviceNames = devs(:);
-                                    deviceDrivers = repmat({''}, numel(devs), 1);
-                                    useAudioToolboxList = true;
-                                end
-                            end
-                        catch
-                            deviceNames = {};
-                        end
-                    end
-                    if ~useAudioToolboxList
-                        % Legacy device list
-                        try
-                            info = audiodevinfo;
-                            inputDevices = info.input;
-                        catch
-                            inputDevices = [];
-                        end
-                    end
                 end
                 
-                useDaqList = useDaq && ~useAudioToolboxList;
-                if ~useAudioToolboxList && ~isempty(inputDevices)
-                    % Use legacy device list (even if DAQ toolbox is present)
-                    useDaqList = false;
-                    deviceNames = cell(length(inputDevices), 1);
-                    deviceIDs = zeros(length(inputDevices), 1);
-                    for i = 1:length(inputDevices)
-                        deviceNames{i} = sprintf('%s (ID: %d)', inputDevices(i).Name, inputDevices(i).ID);
-                        deviceIDs(i) = inputDevices(i).ID;
-                    end
-                end
-
                 if isempty(deviceNames)
-                    if isvalid(deviceSummaryLabel)
-                        if useDaq
-                            deviceSummaryLabel.Text = 'No DAQ audio devices detected';
-                        elseif useAudioToolboxList
-                            deviceSummaryLabel.Text = 'No Audio Toolbox devices detected';
-                        else
-                            deviceSummaryLabel.Text = 'No legacy audio devices detected';
-                        end
-                    end
-                    % Hide all dropdowns and labels, show error
-                    for i = 1:numMics
-                        if ~isempty(labels{i}) && isvalid(labels{i})
-                            labels{i}.Visible = 'off';
-                        end
-                        if ~isempty(dropdowns{i}) && isvalid(dropdowns{i})
-                            dropdowns{i}.Visible = 'off';
-                        end
-                    end
-                    
-                    % Show error label if it doesn't exist
-                    errorLabels = findobj(mainPanel, 'Tag', 'ErrorLabel');
-                    if isempty(errorLabels)
-                        errorLabel = uilabel(mainPanel);
-                        errorLabel.Tag = 'ErrorLabel';
-                        if ~hasAudioToolbox && ~useDaq
-                            errorLabel.Text = ['No audio input devices found. Some interfaces (ASIO) are not visible without ' ...
-                                'Audio Toolbox or Data Acquisition Toolbox.'];
-                        else
-                            errorLabel.Text = 'No audio input devices found. Plug in a microphone and click Refresh.';
-                        end
-                        errorLabel.FontName = app.AppFontName;
-                        errorLabel.FontSize = 12;
-                    errorLabel.FontColor = colors.Danger;
-                        errorLabel.Position = [20 max(60, dialogHeight-180) 440 60];
-                        errorLabel.HorizontalAlignment = 'center';
-                        errorLabel.WordWrap = 'on';
-                    else
-                        errorLabels.Visible = 'on';
-                    end
-                    return;
-                end
-                
-                % Hide error label if it exists
-                errorLabels = findobj(mainPanel, 'Tag', 'ErrorLabel');
-                if ~isempty(errorLabels)
-                    errorLabels.Visible = 'off';
-                end
-                if isvalid(deviceSummaryLabel)
-                    if useAudioToolboxList
-                        deviceSummaryLabel.Text = sprintf('Audio Toolbox devices detected: %d', length(deviceNames));
-                    elseif useDaq
-                        deviceSummaryLabel.Text = sprintf('DAQ devices detected: %d', length(deviceNames));
-                    else
-                        deviceSummaryLabel.Text = sprintf('Legacy devices detected: %d', length(deviceNames));
-                    end
-                end
-                
-                if useDaqList
-                    % DAQ only supports one stream; show one dropdown and hide others
-                    if isempty(app.SelectedDataAcqDeviceId) && ~isempty(deviceIDs)
-                        app.SelectedDataAcqDeviceId = deviceIDs{1};
-                        app.SelectedDataAcqVendor = deviceVendors{1};
-                    end
-                elseif useAudioToolboxList
-                    % Initialize selected device names if empty
-                    if isempty(app.SelectedDeviceNames) || length(app.SelectedDeviceNames) < numMics
-                        app.SelectedDeviceNames = cell(numMics, 1);
-                        for i = 1:min(numMics, length(deviceNames))
-                            app.SelectedDeviceNames{i} = deviceNames{i};
-                        end
-                        % Fill remaining with first device
-                        if numMics > length(deviceNames) && ~isempty(deviceNames)
-                            for i = length(deviceNames)+1:numMics
-                                app.SelectedDeviceNames{i} = deviceNames{1};
-                            end
-                        end
-                    end
-                    if isempty(app.SelectedAudioDeviceName) && ~isempty(deviceNames)
-                        app.SelectedAudioDeviceName = deviceNames{1};
-                    end
-                    if isempty(app.SelectedAudioDriver) && ~isempty(deviceDrivers)
-                        app.SelectedAudioDriver = deviceDrivers{1};
-                    end
+                    deviceDropdown.Items = {'No devices found'};
+                    statusLabel.Text = 'No audio input devices detected. Check connections.';
                 else
-                    % Initialize selected device IDs if empty
-                    if isempty(app.SelectedDeviceIDs) || length(app.SelectedDeviceIDs) < numMics
-                        app.SelectedDeviceIDs = zeros(numMics, 1);
-                        for i = 1:min(numMics, length(deviceIDs))
-                            app.SelectedDeviceIDs(i) = deviceIDs(i);
-                        end
-                        % Fill remaining with first device
-                        if numMics > length(deviceIDs)
-                            for i = length(deviceIDs)+1:numMics
-                                app.SelectedDeviceIDs(i) = deviceIDs(1);
-                            end
-                        end
-                    end
-                end
-                
-                % Create or update dropdowns for each microphone
-                for i = 1:numMics
-                    % Create label if it doesn't exist
-                    if isempty(labels{i}) || ~isvalid(labels{i})
-                        labels{i} = uilabel(mainPanel);
-                        if useDaqList && i == 1
-                            labels{i}.Text = 'Audio Input Device:';
+                    deviceDropdown.Items = deviceNames;
+                    % Try to select previously used device
+                    if ~isempty(app.SelectedAudioDeviceName)
+                        matchIdx = find(contains(deviceNames, app.SelectedAudioDeviceName), 1);
+                        if ~isempty(matchIdx)
+                            deviceDropdown.Value = deviceNames{matchIdx};
                         else
-                            labels{i}.Text = sprintf('Microphone %d:', i);
-                        end
-                        labels{i}.FontName = app.AppFontName;
-                        labels{i}.FontSize = 11;
-                        labels{i}.FontColor = colors.Text;
-                        labels{i}.Position = [30 startY - (i-1)*spacing 120 22];
-                        labels{i}.HorizontalAlignment = 'left';
-                    end
-                    if useDaqList && i > 1
-                        labels{i}.Visible = 'off';
-                    else
-                        labels{i}.Visible = 'on';
-                    end
-                    
-                    % Create or update dropdown
-                    if isempty(dropdowns{i}) || ~isvalid(dropdowns{i})
-                        dropdowns{i} = uidropdown(mainPanel);
-                        dropdowns{i}.FontName = app.AppFontName;
-                        dropdowns{i}.FontSize = 11;
-                        dropdowns{i}.Position = [160 startY - (i-1)*spacing 280 22];
-                        if isprop(dropdowns{i}, 'FontColor')
-                            dropdowns{i}.FontColor = colors.Text;
-                        end
-                        if isprop(dropdowns{i}, 'BackgroundColor')
-                            dropdowns{i}.BackgroundColor = colors.Panel;
-                        end
-                    end
-                    
-                    % Update dropdown items with fresh device list
-                    dropdowns{i}.Items = deviceNames;
-                    if useDaqList && i > 1
-                        dropdowns{i}.Visible = 'off';
-                    else
-                        dropdowns{i}.Visible = 'on';
-                    end
-                    
-                    % Set current selection (try to preserve if device still exists)
-                    if useDaqList
-                        currentID = app.SelectedDataAcqDeviceId;
-                        idx = find(strcmp(deviceIDs, currentID), 1);
-                        if ~isempty(idx)
-                            dropdowns{i}.Value = deviceNames{idx};
-                        else
-                            if ~isempty(deviceNames)
-                                dropdowns{i}.Value = deviceNames{1};
-                                app.SelectedDataAcqDeviceId = deviceIDs{1};
-                                app.SelectedDataAcqVendor = deviceVendors{1};
-                            end
-                        end
-                    elseif useAudioToolboxList
-                        if length(app.SelectedDeviceNames) >= i && ~isempty(app.SelectedDeviceNames{i})
-                            currentName = app.SelectedDeviceNames{i};
-                        else
-                            currentName = '';
-                        end
-                        idx = find(strcmp(deviceNames, currentName), 1);
-                        if ~isempty(idx)
-                            dropdowns{i}.Value = deviceNames{idx};
-                        else
-                            if ~isempty(deviceNames)
-                                dropdowns{i}.Value = deviceNames{1};
-                                app.SelectedDeviceNames{i} = deviceNames{1};
-                            end
+                            deviceDropdown.Value = deviceNames{1};
                         end
                     else
-                        currentID = app.SelectedDeviceIDs(i);
-                        idx = find(deviceIDs == currentID, 1);
-                        if ~isempty(idx)
-                            dropdowns{i}.Value = deviceNames{idx};
-                        else
-                            % Device no longer exists, select first available
-                            if ~isempty(deviceNames)
-                                dropdowns{i}.Value = deviceNames{1};
-                                app.SelectedDeviceIDs(i) = deviceIDs(1);
-                            end
-                        end
+                        deviceDropdown.Value = deviceNames{1};
                     end
-                    
-                    % Store device ID when changed - use a callback that looks up from current items
-                    % This ensures it works even after refresh
-                    micIdx = i; % Capture loop variable
-                    if useDaqList
-                        dropdowns{i}.ValueChangedFcn = @(src,~) updateDataAcqSelectionFromDropdown(app, src, deviceNames, deviceIDs, deviceVendors);
-                    elseif useAudioToolboxList
-                        dropdowns{i}.ValueChangedFcn = @(src,~) updateDeviceNameFromDropdown(app, micIdx, src, deviceNames, deviceDrivers);
-                    else
-                        dropdowns{i}.ValueChangedFcn = @(src,~) updateDeviceIDFromDropdown(app, micIdx, src);
-                    end
+                    statusLabel.Text = sprintf('%d device(s) found', length(deviceNames));
                 end
             end
             
-            % Set refresh button callback
-            refreshBtn.ButtonPushedFcn = @(~,~) refreshDeviceList();
+            % Set callbacks
+            refreshBtn.ButtonPushedFcn = @(~,~) refreshDevices();
+            driverDropdown.ValueChangedFcn = @(~,~) refreshDevices();
             
-            % Initial refresh of device list
-            refreshDeviceList();
-            
-            % Buttons
+            % Initial device scan
+            refreshDevices();
+
+            % OK Button
             okBtn = uibutton(mainPanel, 'push');
             okBtn.Text = 'OK';
             okBtn.FontName = app.AppFontName;
@@ -3201,9 +3090,10 @@ classdef MicVisualizer < matlab.apps.AppBase
             okBtn.FontWeight = 'bold';
             okBtn.BackgroundColor = colors.Success;
             okBtn.FontColor = [1 1 1];
-            okBtn.Position = [150 30 100 35];
-            okBtn.ButtonPushedFcn = @(~,~) closeDialog(app, dialogFig);
+            okBtn.Position = [130 20 100 35];
+            okBtn.ButtonPushedFcn = @(~,~) applyDeviceSelection();
             
+            % Cancel Button
             cancelBtn = uibutton(mainPanel, 'push');
             cancelBtn.Text = 'Cancel';
             cancelBtn.FontName = app.AppFontName;
@@ -3211,10 +3101,52 @@ classdef MicVisualizer < matlab.apps.AppBase
             cancelBtn.FontWeight = 'bold';
             cancelBtn.BackgroundColor = colors.Danger;
             cancelBtn.FontColor = [1 1 1];
-            cancelBtn.Position = [270 30 100 35];
+            cancelBtn.Position = [250 20 100 35];
             cancelBtn.ButtonPushedFcn = @(~,~) delete(dialogFig);
             
+            function applyDeviceSelection()
+                % Save the selected driver and device
+                app.SelectedAudioDriver = driverDropdown.Value;
+                selectedDevice = deviceDropdown.Value;
+                
+                % Extract device name (remove driver suffix)
+                if contains(selectedDevice, ' (ASIO)')
+                    app.SelectedAudioDeviceName = strrep(selectedDevice, ' (ASIO)', '');
+                    app.SelectedAudioDriver = 'ASIO';
+                elseif contains(selectedDevice, ' (DirectSound)')
+                    app.SelectedAudioDeviceName = strrep(selectedDevice, ' (DirectSound)', '');
+                    app.SelectedAudioDriver = 'DirectSound';
+                elseif contains(selectedDevice, ' (WASAPI)')
+                    app.SelectedAudioDeviceName = strrep(selectedDevice, ' (WASAPI)', '');
+                    app.SelectedAudioDriver = 'WASAPI';
+                else
+                    app.SelectedAudioDeviceName = selectedDevice;
+                end
+                
+                % Stop if running
+                if app.IsRunning
+                    stopVisualization(app);
+                end
+                
+                % Reinitialize with new settings
+                initializeAudioRecorders(app);
+                updateDeviceButtonText(app);
+                savePreferences(app);
+
+                if ~app.IsRunning
+                    app.StatusLabel.Text = sprintf('Status: Device configured (%d ch)', app.NumChannels);
+                end
+                
+                delete(dialogFig);
+            end
+            
             dialogFig.Visible = 'on';
+        end
+        
+        function closeDialogWithDriver(app, dialogFig, driverDropdown)
+            % Save the selected driver
+            app.SelectedAudioDriver = driverDropdown.Value;
+            closeDialog(app, dialogFig);
         end
         
         function updateDeviceID(app, micIndex, deviceIDs, selectedName, deviceNames)
@@ -3298,157 +3230,201 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Reinitialize audio recorders with new device selections
             initializeAudioRecorders(app);
             if ~app.IsRunning
-                app.StatusLabel.Text = sprintf('Status: Devices configured for %d microphone(s)', app.NumMics);
+                app.StatusLabel.Text = sprintf('Status: Device configured (%d channels detected)', app.NumChannels);
             end
+            updateDeviceButtonText(app);
             savePreferences(app);
             delete(dialogFig);
         end
         
-        function showSplitGraphsDialog(app)
-            % Create dialog for selecting which inputs to split onto separate graphs
-            numMics = app.NumMics;
-            dialogHeight = min(500, 150 + numMics * 30);
+        function createColorPickerPanel(app)
+            % Create the color picker panel (embedded in control panel, initially hidden)
             colors = getThemeColors(app);
             
-            dialogFig = uifigure('Visible', 'off');
-            dialogFig.Position = [400 300 400 dialogHeight];
-            dialogFig.Name = 'Configure Split Graphs';
-            dialogFig.Color = colors.Window;
-            dialogFig.Resize = 'off';
-            applyDialogIcon(app, dialogFig);
+            app.ColorPickerPanel = uipanel(app.ControlPanel);
+            app.ColorPickerPanel.Title = 'Line Colors';
+            app.ColorPickerPanel.BackgroundColor = colors.PanelAlt;
+            app.ColorPickerPanel.ForegroundColor = colors.Text;
+            app.ColorPickerPanel.FontName = app.AppFontName;
+            app.ColorPickerPanel.FontSize = 10;
+            app.ColorPickerPanel.Position = [10 410 220 190];
+            app.ColorPickerPanel.Visible = 'off';
             
-            % Main panel
-            mainPanel = uipanel(dialogFig);
-            mainPanel.BackgroundColor = colors.PanelAlt;
-            mainPanel.Position = [10 10 380 dialogHeight-20];
-            mainPanel.BorderType = 'line';
-            if isprop(mainPanel, 'BorderColor')
-                mainPanel.BorderColor = colors.Border;
-            end
+            % Channel dropdown
+            channelLabel = uilabel(app.ColorPickerPanel);
+            channelLabel.Text = 'Channel:';
+            channelLabel.FontName = app.AppFontName;
+            channelLabel.FontSize = 10;
+            channelLabel.FontColor = colors.Text;
+            channelLabel.Position = [10 145 60 20];
             
-            % Title
-            titleLabel = uilabel(mainPanel);
-            titleLabel.Text = 'Select Inputs to Display on Separate Graphs';
-            titleLabel.FontName = app.AppFontName;
-            titleLabel.FontSize = 14;
-            titleLabel.FontWeight = 'bold';
-            titleLabel.FontColor = colors.Text;
-            titleLabel.Position = [20 dialogHeight-60 340 30];
-            titleLabel.HorizontalAlignment = 'center';
+            app.ChannelDropdown = uidropdown(app.ColorPickerPanel);
+            app.ChannelDropdown.Items = {'Channel 1'};
+            app.ChannelDropdown.Value = 'Channel 1';
+            app.ChannelDropdown.Position = [75 145 130 22];
+            app.ChannelDropdown.FontName = app.AppFontName;
+            app.ChannelDropdown.FontSize = 10;
+            app.ChannelDropdown.ValueChangedFcn = createCallbackFcn(app, @ChannelDropdownValueChanged, true);
             
-            % Create checkboxes for each input
-            checkboxes = cell(numMics, 1);
-            startY = dialogHeight - 100;
-            spacing = 30;
+            % Color preview box
+            app.ColorPreviewBox = uilabel(app.ColorPickerPanel);
+            app.ColorPreviewBox.Text = '';
+            app.ColorPreviewBox.BackgroundColor = [1 0.5 0];  % Default orange
+            app.ColorPreviewBox.Position = [10 110 195 28];
             
-            for i = 1:numMics
-                checkboxes{i} = uicheckbox(mainPanel);
-                checkboxes{i}.Text = sprintf('Split Input %d', i);
-                checkboxes{i}.FontName = app.AppFontName;
-                checkboxes{i}.FontSize = 11;
-                checkboxes{i}.FontColor = colors.Text;
-                checkboxes{i}.Value = app.SplitInputs(i);
-                checkboxes{i}.Position = [40 startY - (i-1)*spacing 200 22];
-                
-                % Store callback - need to use a function handle that properly assigns
-                micIdx = i;
-                checkboxes{i}.ValueChangedFcn = @(~,~) setSplitInput(app, micIdx, checkboxes{micIdx}.Value);
-            end
+            % Red slider
+            app.ColorRedLabel = uilabel(app.ColorPickerPanel);
+            app.ColorRedLabel.Text = 'R:';
+            app.ColorRedLabel.FontName = app.AppFontName;
+            app.ColorRedLabel.FontSize = 10;
+            app.ColorRedLabel.FontColor = [0.9 0.3 0.3];
+            app.ColorRedLabel.Position = [10 82 20 18];
             
-            % Buttons
-            okBtn = uibutton(mainPanel, 'push');
-            okBtn.Text = 'OK';
-            okBtn.FontName = app.AppFontName;
-            okBtn.FontSize = 12;
-            okBtn.FontWeight = 'bold';
-            okBtn.BackgroundColor = colors.Success;
-            okBtn.FontColor = [1 1 1];
-            okBtn.Position = [120 30 100 35];
-            okBtn.ButtonPushedFcn = @(~,~) closeSplitDialog(app, dialogFig);
+            app.ColorRedSlider = uislider(app.ColorPickerPanel);
+            app.ColorRedSlider.Limits = [0 1];
+            app.ColorRedSlider.Value = 1;
+            app.ColorRedSlider.Position = [30 90 170 3];
+            app.ColorRedSlider.MajorTicks = [];
+            app.ColorRedSlider.MinorTicks = [];
+            app.ColorRedSlider.ValueChangingFcn = createCallbackFcn(app, @ColorSliderChanging, true);
+            app.ColorRedSlider.ValueChangedFcn = createCallbackFcn(app, @ColorSliderChanged, true);
             
-            cancelBtn = uibutton(mainPanel, 'push');
-            cancelBtn.Text = 'Cancel';
-            cancelBtn.FontName = app.AppFontName;
-            cancelBtn.FontSize = 12;
-            cancelBtn.FontWeight = 'bold';
-            cancelBtn.BackgroundColor = colors.Danger;
-            cancelBtn.FontColor = [1 1 1];
-            cancelBtn.Position = [240 30 100 35];
-            cancelBtn.ButtonPushedFcn = @(~,~) delete(dialogFig);
+            % Green slider
+            app.ColorGreenLabel = uilabel(app.ColorPickerPanel);
+            app.ColorGreenLabel.Text = 'G:';
+            app.ColorGreenLabel.FontName = app.AppFontName;
+            app.ColorGreenLabel.FontSize = 10;
+            app.ColorGreenLabel.FontColor = [0.3 0.9 0.3];
+            app.ColorGreenLabel.Position = [10 52 20 18];
             
-            dialogFig.Visible = 'on';
+            app.ColorGreenSlider = uislider(app.ColorPickerPanel);
+            app.ColorGreenSlider.Limits = [0 1];
+            app.ColorGreenSlider.Value = 0.5;
+            app.ColorGreenSlider.Position = [30 60 170 3];
+            app.ColorGreenSlider.MajorTicks = [];
+            app.ColorGreenSlider.MinorTicks = [];
+            app.ColorGreenSlider.ValueChangingFcn = createCallbackFcn(app, @ColorSliderChanging, true);
+            app.ColorGreenSlider.ValueChangedFcn = createCallbackFcn(app, @ColorSliderChanged, true);
+            
+            % Blue slider
+            app.ColorBlueLabel = uilabel(app.ColorPickerPanel);
+            app.ColorBlueLabel.Text = 'B:';
+            app.ColorBlueLabel.FontName = app.AppFontName;
+            app.ColorBlueLabel.FontSize = 10;
+            app.ColorBlueLabel.FontColor = [0.3 0.3 0.9];
+            app.ColorBlueLabel.Position = [10 22 20 18];
+            
+            app.ColorBlueSlider = uislider(app.ColorPickerPanel);
+            app.ColorBlueSlider.Limits = [0 1];
+            app.ColorBlueSlider.Value = 0;
+            app.ColorBlueSlider.Position = [30 30 170 3];
+            app.ColorBlueSlider.MajorTicks = [];
+            app.ColorBlueSlider.MinorTicks = [];
+            app.ColorBlueSlider.ValueChangingFcn = createCallbackFcn(app, @ColorSliderChanging, true);
+            app.ColorBlueSlider.ValueChangedFcn = createCallbackFcn(app, @ColorSliderChanged, true);
         end
         
-        function setSplitInput(app, micIdx, value)
-            % Helper function to set split input value
-            if micIdx > 0 && micIdx <= length(app.SplitInputs)
-                app.SplitInputs(micIdx) = value;
+        function initializeChannelColors(app, numChannels)
+            % Initialize channel colors with distinct default colors
+            if numChannels < 1
+                numChannels = 1;
             end
-        end
-        
-        function closeSplitDialog(app, dialogFig)
-            % Clean up existing split axes if visualization is running
-            if app.IsRunning
-                cleanupSplitAxes(app);
-            end
-            savePreferences(app);
-            delete(dialogFig);
-        end
-        
-        function cleanupSplitAxes(app)
-            % Remove all split axes
-            if ~isempty(app.SplitAxes)
-                for i = 1:length(app.SplitAxes)
-                    if isvalid(app.SplitAxes{i})
-                        delete(app.SplitAxes{i});
-                    end
+            
+            % Use a set of visually distinct colors
+            defaultColors = [
+                0.93 0.67 0.00;  % Gold/Orange (WVU Gold-ish)
+                0.00 0.45 0.74;  % Blue
+                0.85 0.33 0.10;  % Red-orange
+                0.49 0.18 0.56;  % Purple
+                0.47 0.67 0.19;  % Green
+                0.30 0.75 0.93;  % Cyan
+                0.64 0.08 0.18;  % Dark red
+                1.00 0.84 0.00;  % Yellow
+            ];
+            
+            % Preserve existing colors if possible
+            if isempty(app.ChannelColors)
+                app.ChannelColors = zeros(numChannels, 3);
+                for i = 1:numChannels
+                    colorIdx = mod(i-1, size(defaultColors, 1)) + 1;
+                    app.ChannelColors(i, :) = defaultColors(colorIdx, :);
                 end
-                app.SplitAxes = {};
+            elseif size(app.ChannelColors, 1) < numChannels
+                % Extend with new colors
+                oldCount = size(app.ChannelColors, 1);
+                app.ChannelColors = [app.ChannelColors; zeros(numChannels - oldCount, 3)];
+                for i = (oldCount+1):numChannels
+                    colorIdx = mod(i-1, size(defaultColors, 1)) + 1;
+                    app.ChannelColors(i, :) = defaultColors(colorIdx, :);
+                end
             end
         end
         
-        function createSplitAxes(app, numSplits)
-            % Create axes for split displays
-            cleanupSplitAxes(app);
-            
-            if numSplits == 0
+        function updateColorPickerForChannel(app, channelIdx)
+            % Update color picker sliders/preview for selected channel
+            if channelIdx < 1 || channelIdx > size(app.ChannelColors, 1)
                 return;
             end
             
-            % Calculate layout - arrange in grid
-            cols = ceil(sqrt(numSplits));
-            rows = ceil(numSplits / cols);
+            color = app.ChannelColors(channelIdx, :);
             
-            panelWidth = app.VisualizerPanel.Position(3) - 40;
-            panelHeight = app.VisualizerPanel.Position(4) - 40;
+            app.ColorRedSlider.Value = color(1);
+            app.ColorGreenSlider.Value = color(2);
+            app.ColorBlueSlider.Value = color(3);
+            app.ColorPreviewBox.BackgroundColor = color;
+        end
+        
+        function updateColorPreview(app)
+            % Update the color preview box from current slider values
+            r = app.ColorRedSlider.Value;
+            g = app.ColorGreenSlider.Value;
+            b = app.ColorBlueSlider.Value;
+            app.ColorPreviewBox.BackgroundColor = [r g b];
+        end
+        
+        function applyCurrentColor(app)
+            % Apply the current color to the selected channel
+            channelStr = app.ChannelDropdown.Value;
+            channelIdx = str2double(regexp(channelStr, '\d+', 'match', 'once'));
             
-            axWidth = (panelWidth - 20*(cols+1)) / cols;
-            axHeight = (panelHeight - 20*(rows+1)) / rows;
-            
-            app.SplitAxes = cell(numSplits, 1);
-            splitIdx = 1;
-            
-            for row = 1:rows
-                for col = 1:cols
-                    if splitIdx > numSplits
-                        break;
-                    end
-                    
-                    xPos = 20 + (col-1) * (axWidth + 20);
-                    yPos = 20 + (rows-row) * (axHeight + 20);
-                    
-                    ax = uiaxes(app.VisualizerPanel);
-                    ax.Position = [xPos yPos axWidth axHeight];
-                    ax.FontName = app.AppFontName;
-                    applyAxesTheme(app, ax);
-                    
-                    app.SplitAxes{splitIdx} = ax;
-                    splitIdx = splitIdx + 1;
-                end
-                if splitIdx > numSplits
-                    break;
-                end
+            if isnan(channelIdx) || channelIdx < 1
+                return;
             end
+            
+            % Ensure channel colors array is large enough
+            if size(app.ChannelColors, 1) < channelIdx
+                initializeChannelColors(app, channelIdx);
+            end
+            
+            r = app.ColorRedSlider.Value;
+            g = app.ColorGreenSlider.Value;
+            b = app.ColorBlueSlider.Value;
+            app.ChannelColors(channelIdx, :) = [r g b];
+            
+            % Force redraw of plot lines with new color
+            app.PlotLines = {};  % Clear to trigger full redraw
+            
+            savePreferences(app);
+        end
+        
+        function updateChannelDropdownItems(app)
+            % Update the channel dropdown with current number of channels
+            numChannels = max(1, app.NumChannels);
+            items = cell(numChannels, 1);
+            for i = 1:numChannels
+                items{i} = sprintf('Channel %d', i);
+            end
+            app.ChannelDropdown.Items = items;
+            if ~any(strcmp(items, app.ChannelDropdown.Value))
+                app.ChannelDropdown.Value = items{1};
+            end
+            
+            % Update color picker for currently selected channel
+            channelIdx = find(strcmp(items, app.ChannelDropdown.Value), 1);
+            if isempty(channelIdx)
+                channelIdx = 1;
+            end
+            updateColorPickerForChannel(app, channelIdx);
         end
         
         % Button pushed function: StartButton
@@ -3468,12 +3444,47 @@ classdef MicVisualizer < matlab.apps.AppBase
         
         % Button pushed function: StopButton
         function StopButtonPushed(app, event)
-            % Disable button immediately to show responsiveness
+            %#ok<INUSD>
             app.StopButton.Enable = 'off';
-            drawnow; % Allow UI to update immediately
+            drawnow;
             stopVisualization(app);
         end
         
+        % Button pushed function: PauseButton
+        function PauseButtonPushed(app, event)
+            %#ok<INUSD>
+            togglePause(app);
+        end
+        
+        % Toggle pause state
+        function togglePause(app)
+            if ~app.IsRunning
+                return;
+            end
+            
+            app.IsPaused = ~app.IsPaused;
+            
+            if app.IsPaused
+                app.PauseButton.Text = 'Resume';
+                app.PauseButton.BackgroundColor = [0.8 0.6 0.0];  % Orange/amber for paused
+                app.StatusLabel.Text = 'Status: Paused';
+            else
+                app.PauseButton.Text = 'Pause';
+                app.PauseButton.BackgroundColor = [0.6 0.6 0.2];  % Yellow-ish for active pause button
+                app.StatusLabel.Text = 'Status: Running';
+            end
+        end
+        
+        % Key press handler for UIFigure
+        function UIFigureKeyPress(app, event)
+            % Space bar toggles pause when running
+            if strcmp(event.Key, 'space')
+                if app.IsRunning
+                    togglePause(app);
+                end
+            end
+        end
+
         % Close request function: UIFigure
         function UIFigureCloseRequest(app, event)
             % Force stop everything immediately - don't wait for anything
@@ -3499,8 +3510,8 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Stop all recorders/readers immediately
             cleanupAudioResources(app);
             
-            % Clean up split axes
-            cleanupSplitAxes(app);
+            % Clear plot lines
+            app.PlotLines = {};
             
             % Delete the figure directly
             if isvalid(app.UIFigure)
