@@ -28,6 +28,9 @@ classdef MicVisualizer < matlab.apps.AppBase
         AudioRecorders          % Cell array of audio recorder objects (legacy method)
         AudioDeviceReaders      % Cell array of audioDeviceReader objects (Audio Toolbox method)
         UseAudioToolbox = false % Flag to use Audio Toolbox if available
+        UseDataAcq = false      % Flag to use Data Acquisition Toolbox if available
+        DataAcqSession          % DataAcquisition object (DAQ audio)
+        DataAcqListener         % DataAvailable listener (DAQ audio)
         Timer                   % Timer for updating visualization
         IsRunning = false       % Flag to track if visualization is running
         NumMics = 4             % Number of microphones
@@ -38,6 +41,18 @@ classdef MicVisualizer < matlab.apps.AppBase
         SplitInputs = false(16,1)  % Boolean array indicating which inputs to split
         SplitAxes = {}          % Cell array of axes for split displays
         AudioHistory = {}       % Rolling history of recent audio frames for display
+        LegacyLastTotalSamples = 0 % Last total sample count (legacy)
+        LegacyNoDataCount = 0      % Consecutive no-data frames (legacy)
+        LegacyMaxNoDataFrames = 20 % Frames before attempting restart (legacy)
+        LegacyRestartCooldownSeconds = 2 % Restart cooldown (legacy)
+        LegacyRestartCooldownUntil = 0   % Next allowed restart time (legacy)
+        LegacyErrorShown = false % Track if legacy error shown
+        DataAcqNoDataCount = 0     % Consecutive no-data frames (DAQ)
+        DataAcqMaxNoDataFrames = 20 % Frames before warning (DAQ)
+        PrefsFilePath = ''      % Path to preferences file
+        IsApplyingPrefs = false % Avoid callbacks when loading prefs
+        SelectedDataAcqVendor = '' % Selected DAQ vendor (e.g., directsound)
+        SelectedDataAcqDeviceId = '' % Selected DAQ device id
         WVUGold = [238, 170, 0] / 255      % WVU Gold color
         WVUBlue = [0, 40, 85] / 255        % WVU Blue color
         WVUBlueLight = [0, 60, 120] / 255  % Lighter WVU Blue
@@ -256,6 +271,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.GainSlider.Limits = [0.1 5];
             app.GainSlider.Value = 1;
             app.GainSlider.Position = [20 410 200 3];
+            app.GainSlider.ValueChangedFcn = createCallbackFcn(app, @GainSliderValueChanged, true);
             
             % Display Options
             app.WaveformDisplayCheckBox = uicheckbox(app.ControlPanel);
@@ -265,6 +281,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.WaveformDisplayCheckBox.FontColor = app.WVUGold;
             app.WaveformDisplayCheckBox.Value = true;
             app.WaveformDisplayCheckBox.Position = [20 350 150 22];
+            app.WaveformDisplayCheckBox.ValueChangedFcn = createCallbackFcn(app, @DisplayOptionValueChanged, true);
             
             app.FFTDisplayCheckBox = uicheckbox(app.ControlPanel);
             app.FFTDisplayCheckBox.Text = 'FFT Display';
@@ -273,6 +290,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.FFTDisplayCheckBox.FontColor = app.WVUGold;
             app.FFTDisplayCheckBox.Value = false;
             app.FFTDisplayCheckBox.Position = [20 320 150 22];
+            app.FFTDisplayCheckBox.ValueChangedFcn = createCallbackFcn(app, @DisplayOptionValueChanged, true);
             
             % Split Graphs Button
             app.SplitGraphsButton = uibutton(app.ControlPanel, 'push');
@@ -386,10 +404,231 @@ classdef MicVisualizer < matlab.apps.AppBase
             hasToolbox = license('test', 'Audio_Toolbox') && exist('audioDeviceReader', 'class');
             app.UseAudioToolbox = hasToolbox;
         end
+
+        function hasToolbox = checkDataAcqToolbox(app)
+            % Check if Data Acquisition Toolbox is available
+            hasToolbox = license('test', 'Data_Acq_Toolbox') && (exist('daq', 'file') == 2 || exist('daq', 'class') == 8);
+            if hasToolbox && exist('daqvendorlist', 'file') == 2
+                try
+                    if isempty(getOperationalDaqVendor(app))
+                        hasToolbox = false;
+                    end
+                catch
+                end
+            end
+            app.UseDataAcq = hasToolbox;
+        end
+
+        function vendorName = getOperationalDaqVendor(app)
+            %#ok<INUSD>
+            vendorName = '';
+            try
+                if exist('daqvendorlist', 'file') == 2
+                    v = daqvendorlist;
+                    if istable(v)
+                        ops = v.Operational;
+                        if islogical(ops)
+                            idx = find(ops, 1);
+                        else
+                            idx = find(strcmpi(string(ops), "true"), 1);
+                        end
+                        if ~isempty(idx)
+                            vendorName = char(v.ID(idx));
+                            return;
+                        end
+                    end
+                end
+            catch
+            end
+        end
+
+        function tf = isOperationalDaqVendor(app, vendorName)
+            %#ok<INUSD>
+            tf = false;
+            if isempty(vendorName)
+                return;
+            end
+            try
+                if exist('daqvendorlist', 'file') == 2
+                    v = daqvendorlist;
+                    if istable(v)
+                        idx = find(strcmpi(string(v.ID), string(vendorName)), 1);
+                        if ~isempty(idx)
+                            ops = v.Operational(idx);
+                            if islogical(ops)
+                                tf = ops;
+                            else
+                                tf = strcmpi(string(ops), "true");
+                            end
+                        end
+                    end
+                end
+            catch
+            end
+        end
+
+        function prefsPath = getPrefsFilePath(app)
+            %#ok<INUSD>
+            prefsPath = fullfile(tempdir, 'MicVisualizerPrefs.mat');
+        end
+
+        function loadPreferences(app)
+            prefsPath = app.getPrefsFilePath();
+            if exist(prefsPath, 'file') ~= 2
+                return;
+            end
+            try
+                data = load(prefsPath, 'prefs');
+                if ~isfield(data, 'prefs')
+                    return;
+                end
+                prefs = data.prefs;
+                app.IsApplyingPrefs = true;
+
+                if isfield(prefs, 'NumMics')
+                    app.NumMics = max(1, min(16, prefs.NumMics));
+                    app.NumMicsSpinner.Value = app.NumMics;
+                end
+                if isfield(prefs, 'SampleRate')
+                    app.SampleRate = max(8000, min(192000, prefs.SampleRate));
+                    app.SampleRateSpinner.Value = app.SampleRate;
+                end
+                if isfield(prefs, 'Gain')
+                    app.GainSlider.Value = prefs.Gain;
+                end
+                if isfield(prefs, 'WaveformDisplay')
+                    app.WaveformDisplayCheckBox.Value = logical(prefs.WaveformDisplay);
+                end
+                if isfield(prefs, 'FFTDisplay')
+                    app.FFTDisplayCheckBox.Value = logical(prefs.FFTDisplay);
+                end
+                if isfield(prefs, 'SplitInputs')
+                    split = logical(prefs.SplitInputs(:));
+                    if length(split) ~= app.NumMics
+                        split = false(app.NumMics, 1);
+                    end
+                    app.SplitInputs = split;
+                else
+                    app.SplitInputs = false(app.NumMics, 1);
+                end
+                if isfield(prefs, 'SelectedDeviceIDs')
+                    app.SelectedDeviceIDs = prefs.SelectedDeviceIDs(:);
+                end
+                if isfield(prefs, 'SelectedDeviceNames')
+                    app.SelectedDeviceNames = prefs.SelectedDeviceNames;
+                end
+                if isfield(prefs, 'SelectedDataAcqVendor')
+                    app.SelectedDataAcqVendor = char(prefs.SelectedDataAcqVendor);
+                end
+                if isfield(prefs, 'SelectedDataAcqDeviceId')
+                    app.SelectedDataAcqDeviceId = char(prefs.SelectedDataAcqDeviceId);
+                end
+            catch
+                % Ignore prefs load errors
+            end
+            app.IsApplyingPrefs = false;
+        end
+
+        function savePreferences(app)
+            prefsPath = app.getPrefsFilePath();
+            try
+                prefs.NumMics = app.NumMics;
+                prefs.SampleRate = app.SampleRate;
+                prefs.Gain = app.GainSlider.Value;
+                prefs.WaveformDisplay = app.WaveformDisplayCheckBox.Value;
+                prefs.FFTDisplay = app.FFTDisplayCheckBox.Value;
+                prefs.SplitInputs = app.SplitInputs;
+                prefs.SelectedDeviceIDs = app.SelectedDeviceIDs;
+                prefs.SelectedDeviceNames = app.SelectedDeviceNames;
+                prefs.SelectedDataAcqVendor = app.SelectedDataAcqVendor;
+                prefs.SelectedDataAcqDeviceId = app.SelectedDataAcqDeviceId;
+                save(prefsPath, 'prefs');
+            catch
+                % Ignore prefs save errors
+            end
+        end
+
+        function tf = deviceHasAudioSubsystem(app, device)
+            %#ok<INUSD>
+            tf = false;
+            try
+                subs = device.Subsystems;
+                if ischar(subs) || isstring(subs)
+                    tf = contains(lower(string(subs)), "audio");
+                    return;
+                end
+                if isstruct(subs)
+                    for i = 1:numel(subs)
+                        if isfield(subs(i), 'SubsystemType')
+                            if contains(lower(string(subs(i).SubsystemType)), "audio")
+                                tf = true;
+                                return;
+                            end
+                        elseif isfield(subs(i), 'Name')
+                            if contains(lower(string(subs(i).Name)), "audio")
+                                tf = true;
+                                return;
+                            end
+                        end
+                    end
+                end
+            catch
+            end
+        end
+
+        function [vendorName, deviceId] = pickDataAcqAudioDevice(app)
+            %#ok<INUSD>
+            vendorName = '';
+            deviceId = '';
+            vendorsToTry = ["directsound", "wasapi"];
+            operationalVendor = getOperationalDaqVendor(app);
+            if ~isempty(operationalVendor)
+                vendorsToTry = [string(operationalVendor), vendorsToTry];
+            end
+
+            % Prefer daqlist when available
+            if exist('daqlist', 'file') == 2
+                for v = vendorsToTry
+                    try
+                        t = daqlist(v);
+                        if ~isempty(t)
+                            vendorName = char(v);
+                            deviceId = t.DeviceID(1);
+                            return;
+                        end
+                    catch
+                    end
+                end
+            end
+
+            % Fallback to daq.getDevices
+            try
+                devices = daq.getDevices;
+                for i = 1:numel(devices)
+                    if any(strcmpi(devices(i).Vendor, vendorsToTry)) && deviceHasAudioSubsystem(app, devices(i))
+                        vendorName = devices(i).Vendor;
+                        deviceId = devices(i).ID;
+                        return;
+                    end
+                end
+            catch
+            end
+        end
         
         function initializeAudioRecorders(app)
             % Initialize audio recorders - use Audio Toolbox if available, otherwise legacy method
             try
+                % Prefer Data Acquisition Toolbox if available (more robust on Windows)
+                if checkDataAcqToolbox(app)
+                    try
+                        initializeDataAcq(app);
+                        return;
+                    catch
+                        app.UseDataAcq = false;
+                        % Continue to try Audio Toolbox / legacy
+                    end
+                end
+
                 % Check if Audio Toolbox is available
                 if checkAudioToolbox(app)
                     initializeAudioToolboxReaders(app);
@@ -406,6 +645,121 @@ classdef MicVisualizer < matlab.apps.AppBase
                 catch
                     rethrow(ME);
                 end
+            end
+        end
+
+        function initializeDataAcq(app)
+            % Initialize using Data Acquisition Toolbox audio input
+            try
+                % Clean up existing DAQ session and listener
+                if ~isempty(app.DataAcqListener)
+                    try
+                        delete(app.DataAcqListener);
+                    catch
+                    end
+                end
+                app.DataAcqListener = [];
+
+                if ~isempty(app.DataAcqSession)
+                    try
+                        stop(app.DataAcqSession);
+                    catch
+                    end
+                    try
+                        delete(app.DataAcqSession);
+                    catch
+                    end
+                end
+                app.DataAcqSession = [];
+
+                % Pick vendor and device (prefer saved selection)
+                vendorName = app.SelectedDataAcqVendor;
+                deviceId = app.SelectedDataAcqDeviceId;
+                if ~isOperationalDaqVendor(app, vendorName)
+                    vendorName = '';
+                    deviceId = '';
+                end
+                if isempty(vendorName) || isempty(deviceId)
+                    [vendorName, deviceId] = pickDataAcqAudioDevice(app);
+                end
+                if isempty(vendorName)
+                    vendorName = getOperationalDaqVendor(app);
+                end
+                if isempty(vendorName)
+                    error('No operational DAQ vendor found. Run daqvendorlist to verify installed vendors.');
+                end
+
+                dq = daq(vendorName);
+                if ~isempty(deviceId)
+                    addinput(dq, deviceId, 1, "Audio");
+                else
+                    % Fall back to first available device for vendor
+                    addinput(dq, "Audio1", 1, "Audio");
+                end
+
+                dq.Rate = app.SampleRate;
+                dq.NotifyWhenDataAvailableExceeds = max(256, round(dq.Rate * 0.05));
+
+                app.DataAcqSession = dq;
+                app.UseDataAcq = true;
+                app.SelectedDataAcqVendor = char(vendorName);
+                if ~isempty(deviceId)
+                    app.SelectedDataAcqDeviceId = char(deviceId);
+                end
+
+                % Initialize audio history buffers (~0.5 seconds)
+                for i = 1:app.NumMics
+                    app.AudioHistory{i} = zeros(0, 1);
+                end
+                app.DataAcqNoDataCount = 0;
+
+                % Attach listener to collect data continuously
+                app.DataAcqListener = addlistener(dq, "DataAvailable", ...
+                    @(~, evt) onDataAcqDataAvailable(app, evt));
+
+                app.StatusLabel.Text = sprintf('Status: Ready at %d Hz (DAQ)', app.SampleRate);
+            catch ME
+                app.UseDataAcq = false;
+                app.StatusLabel.Text = sprintf('Status: Error - %s', ME.message);
+                throw(ME);
+            end
+        end
+
+        function startDataAcqIfNeeded(app)
+            if ~app.UseDataAcq || isempty(app.DataAcqSession)
+                return;
+            end
+            try
+                start(app.DataAcqSession, "continuous");
+            catch
+                try
+                    start(app.DataAcqSession);
+                catch
+                end
+            end
+        end
+
+        function onDataAcqDataAvailable(app, evt)
+            % Listener callback for DAQ audio data
+            try
+                if isempty(evt) || isempty(evt.Data)
+                    return;
+                end
+                frameData = evt.Data;
+                if ~isa(frameData, 'double')
+                    frameData = double(frameData);
+                end
+                frameData = frameData * app.GainSlider.Value;
+
+                maxHistorySamples = round(app.SampleRate * 0.5);
+                for micIdx = 1:app.NumMics
+                    app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:)];
+                    if length(app.AudioHistory{micIdx}) > maxHistorySamples
+                        app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                    end
+                end
+            catch
+                % Ignore listener errors
             end
         end
         
@@ -548,6 +902,11 @@ classdef MicVisualizer < matlab.apps.AppBase
                     app.StatusLabel.Text = sprintf('Status: Initialized %d microphone(s) (requested %d)', ...
                         length(app.AudioRecorders), app.NumMics);
                 end
+
+                % Reset legacy tracking counters after init
+                app.LegacyLastTotalSamples = 0;
+                app.LegacyNoDataCount = 0;
+                app.LegacyErrorShown = false;
                 
             catch ME
                 errorMsg = ME.message;
@@ -561,6 +920,49 @@ classdef MicVisualizer < matlab.apps.AppBase
                 uialert(app.UIFigure, sprintf('Error initializing audio:\n\n%s', errorMsg), 'Audio Error', 'Icon', 'error');
             end
         end
+
+        function restarted = restartLegacyRecorder(app, reason)
+            % Attempt to recover an unresponsive legacy recorder
+            restarted = false;
+            try
+                if now < app.LegacyRestartCooldownUntil
+                    return;
+                end
+                app.LegacyRestartCooldownUntil = now + app.LegacyRestartCooldownSeconds / 86400;
+                app.StatusLabel.Text = sprintf('Status: Restarting audio device (%s)...', reason);
+
+                % Stop and delete existing recorders
+                if ~isempty(app.AudioRecorders)
+                    for i = 1:length(app.AudioRecorders)
+                        if isvalid(app.AudioRecorders{i})
+                            try
+                                stop(app.AudioRecorders{i});
+                                delete(app.AudioRecorders{i});
+                            catch
+                            end
+                        end
+                    end
+                end
+                app.AudioRecorders = {};
+
+                % Reinitialize and start recording
+                initializeAudioRecordersLegacy(app);
+                for i = 1:length(app.AudioRecorders)
+                    if isvalid(app.AudioRecorders{i})
+                        try
+                            record(app.AudioRecorders{i});
+                        catch
+                        end
+                    end
+                end
+
+                app.LegacyLastTotalSamples = 0;
+                app.LegacyNoDataCount = 0;
+                restarted = true;
+            catch
+                % Keep running; next timer tick can retry
+            end
+        end
         
         function startVisualization(app)
             if app.IsRunning
@@ -571,7 +973,15 @@ classdef MicVisualizer < matlab.apps.AppBase
                 % Initialize audio recorders (Audio Toolbox or legacy)
                 initializeAudioRecorders(app);
                 
-                if app.UseAudioToolbox
+                if app.UseDataAcq
+                    % DAQ method - session already running
+                    if isempty(app.DataAcqSession)
+                        error('No DAQ audio session available');
+                    end
+                    startDataAcqIfNeeded(app);
+                    app.StatusLabel.Text = sprintf('Status: Running at %d Hz (DAQ)', app.SampleRate);
+                    app.DataAcqNoDataCount = 0;
+                elseif app.UseAudioToolbox
                     % Audio Toolbox method - readers are ready to use immediately
                     if isempty(app.AudioDeviceReaders)
                         error('No audio device readers available');
@@ -606,6 +1016,11 @@ classdef MicVisualizer < matlab.apps.AppBase
                     else
                         app.StatusLabel.Text = 'Status: Warning - Recorder failed to start';
                     end
+
+                    % Reset legacy tracking counters
+                    app.LegacyLastTotalSamples = 0;
+                    app.LegacyNoDataCount = 0;
+                    app.LegacyErrorShown = false;
                 end
                 
                 % Update UI immediately
@@ -645,59 +1060,6 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Force stop - don't wait for anything
             app.IsRunning = false;
             
-            % Stop timer immediately (non-blocking)
-            if ~isempty(app.Timer) && isvalid(app.Timer)
-                try
-                    stop(app.Timer);
-                catch
-                end
-                try
-                    delete(app.Timer);
-                catch
-                end
-                app.Timer = [];
-            end
-            
-            % Clean up any initialization timers (non-blocking)
-            try
-                allTimers = timerfind;
-                for t = allTimers
-                    if isvalid(t)
-                        try
-                            stop(t);
-                            delete(t);
-                        catch
-                        end
-                    end
-                end
-            catch
-            end
-            
-            % Stop all recorders/readers (non-blocking)
-            if app.UseAudioToolbox && ~isempty(app.AudioDeviceReaders)
-                for i = 1:length(app.AudioDeviceReaders)
-                    if isvalid(app.AudioDeviceReaders{i})
-                        try
-                            release(app.AudioDeviceReaders{i});
-                        catch
-                        end
-                    end
-                end
-                % Clear audio history
-                app.AudioHistory = {};
-            end
-            
-            if ~isempty(app.AudioRecorders)
-                for i = 1:length(app.AudioRecorders)
-                    if isvalid(app.AudioRecorders{i})
-                        try
-                            stop(app.AudioRecorders{i});
-                        catch
-                        end
-                    end
-                end
-            end
-            
             % Update UI
             app.StartButton.Enable = 'on';
             app.StopButton.Enable = 'off';
@@ -710,6 +1072,60 @@ classdef MicVisualizer < matlab.apps.AppBase
                 app.MicAxes.Visible = 'on';
             catch
             end
+
+            % Skip cleanup on Stop to avoid UI hang; cleanup happens on close
+        end
+
+
+        function cleanupAudioResources(app)
+            % Stop all recorders/readers (best-effort, non-blocking)
+            if app.UseDataAcq && ~isempty(app.DataAcqSession)
+                try
+                    if ~isempty(app.DataAcqListener)
+                        delete(app.DataAcqListener);
+                    end
+                    app.DataAcqListener = [];
+                catch
+                end
+                try
+                    stop(app.DataAcqSession);
+                catch
+                end
+                try
+                    delete(app.DataAcqSession);
+                catch
+                end
+                app.DataAcqSession = [];
+                app.AudioHistory = {};
+            end
+
+            if app.UseAudioToolbox && ~isempty(app.AudioDeviceReaders)
+                for i = 1:length(app.AudioDeviceReaders)
+                    if isvalid(app.AudioDeviceReaders{i})
+                        try
+                            release(app.AudioDeviceReaders{i});
+                        catch
+                        end
+                    end
+                end
+                app.AudioHistory = {};
+            end
+
+            if ~isempty(app.AudioRecorders)
+                for i = 1:length(app.AudioRecorders)
+                    if isvalid(app.AudioRecorders{i})
+                        try
+                            stop(app.AudioRecorders{i});
+                        catch
+                        end
+                    end
+                end
+            end
+
+            % Reset legacy tracking counters
+            app.LegacyLastTotalSamples = 0;
+            app.LegacyNoDataCount = 0;
+            app.LegacyErrorShown = false;
         end
         
         function updateVisualization(app)
@@ -725,7 +1141,32 @@ classdef MicVisualizer < matlab.apps.AppBase
                 audioData = [];
                 timeData = [];
                 
-                if app.UseAudioToolbox
+                if app.UseDataAcq
+                    % DAQ method - use rolling history populated by listener
+                    if ~isempty(app.AudioHistory) && ~isempty(app.AudioHistory{1})
+                        app.DataAcqNoDataCount = 0;
+                        if app.NumMics == 1
+                            audioData = app.AudioHistory{1}(:);
+                        else
+                            minLen = length(app.AudioHistory{1});
+                            for micIdx = 2:app.NumMics
+                                if length(app.AudioHistory{micIdx}) < minLen
+                                    minLen = length(app.AudioHistory{micIdx});
+                                end
+                            end
+                            audioData = zeros(minLen, app.NumMics);
+                            for micIdx = 1:app.NumMics
+                                audioData(:, micIdx) = app.AudioHistory{micIdx}(1:minLen);
+                            end
+                        end
+                        timeData = (0:length(audioData)-1) / app.SampleRate;
+                    else
+                        app.DataAcqNoDataCount = app.DataAcqNoDataCount + 1;
+                        if app.DataAcqNoDataCount >= app.DataAcqMaxNoDataFrames
+                            app.StatusLabel.Text = 'Status: No audio data (DAQ). Check device/permissions.';
+                        end
+                    end
+                elseif app.UseAudioToolbox
                     % Audio Toolbox method - following MathWorks real-time pattern
                     % Read frame directly, accumulate rolling history, display immediately
                     if ~isempty(app.AudioDeviceReaders) && isvalid(app.AudioDeviceReaders{1})
@@ -780,6 +1221,7 @@ classdef MicVisualizer < matlab.apps.AppBase
                     end
                 else
                     % Legacy method - use audiorecorder
+                    anyDataThisTick = false;
                     for i = 1:length(app.AudioRecorders)
                         if isvalid(app.AudioRecorders{i})
                             try
@@ -790,9 +1232,7 @@ classdef MicVisualizer < matlab.apps.AppBase
                                     isRec = false;
                                 end
                                 
-                                if ~isRec
-                                    continue;
-                                end
+                                % Don't skip on isrecording false; some drivers misreport
                                 
                                 % Get current audio data - completely suppress errors
                                 try
@@ -802,6 +1242,10 @@ classdef MicVisualizer < matlab.apps.AppBase
                                 end
                                 
                                 if totalSamples < 1  % Accept any data, even just 1 sample
+                                    continue;
+                                end
+
+                                if totalSamples <= app.LegacyLastTotalSamples
                                     continue;
                                 end
                                 
@@ -814,9 +1258,15 @@ classdef MicVisualizer < matlab.apps.AppBase
                                 catch
                                     % Timeout or error - just skip silently
                                     data = [];
+                                    if ~app.LegacyErrorShown
+                                        app.StatusLabel.Text = 'Status: Audio device unresponsive. Check permissions/exclusive use.';
+                                        app.LegacyErrorShown = true;
+                                    end
                                 end
                                 
                                 if ~isempty(data) && length(data) > 0
+                                    anyDataThisTick = true;
+                                    app.LegacyLastTotalSamples = totalSamples;
                                     % Apply gain
                                     data = data * app.GainSlider.Value;
                                     
@@ -850,6 +1300,20 @@ classdef MicVisualizer < matlab.apps.AppBase
                             end
                         end
                     end
+
+                    if anyDataThisTick
+                        app.LegacyNoDataCount = 0;
+                    else
+                        app.LegacyNoDataCount = app.LegacyNoDataCount + 1;
+                        if app.LegacyNoDataCount >= app.LegacyMaxNoDataFrames
+                            app.StatusLabel.Text = 'Status: No audio data. Check mic permissions/exclusive mode.';
+                        end
+                        if app.LegacyNoDataCount >= app.LegacyMaxNoDataFrames
+                            if restartLegacyRecorder(app, 'no data received')
+                                return;
+                            end
+                        end
+                    end
                     
                     % If user requested multiple mics but we only have one recorder,
                     % duplicate the data to show multiple "channels"
@@ -865,7 +1329,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
                 
                 % Update status
-                if app.UseAudioToolbox
+                if app.UseDataAcq
+                    app.StatusLabel.Text = sprintf('Status: Running at %d Hz (DAQ)', app.SampleRate);
+                elseif app.UseAudioToolbox
                     app.StatusLabel.Text = sprintf('Status: Running at %d Hz', app.SampleRate);
                 else
                     app.StatusLabel.Text = sprintf('Status: Running (%d channel(s))', size(audioData, 2));
@@ -1040,6 +1506,10 @@ classdef MicVisualizer < matlab.apps.AppBase
             
             % Create UIFigure and components
             createComponents(app)
+
+            % Load saved preferences
+            app.PrefsFilePath = app.getPrefsFilePath();
+            loadPreferences(app);
             
             % Don't initialize audio on startup - wait until user clicks Start
             % This prevents hanging if device is busy
@@ -1050,6 +1520,15 @@ classdef MicVisualizer < matlab.apps.AppBase
         function delete(app)
             % Stop visualization
             stopVisualization(app);
+
+            % Save preferences on exit
+            savePreferences(app);
+
+            % Clear app variable from base workspace if present
+            try
+                evalin('base', 'if exist(''app'', ''var''), clear app; end');
+            catch
+            end
             
             % Clean up timer
             if ~isempty(app.Timer) && isvalid(app.Timer)
@@ -1088,9 +1567,25 @@ classdef MicVisualizer < matlab.apps.AppBase
         % Code that executes when component value is changed.
         function NumMicsSpinnerValueChanged(app, event)
             newNumMics = app.NumMicsSpinner.Value;
+
+            if app.IsApplyingPrefs
+                app.NumMics = newNumMics;
+                app.SplitInputs = false(newNumMics, 1);
+                return;
+            end
+
+            if app.IsRunning
+                app.IsApplyingPrefs = true;
+                app.NumMicsSpinner.Value = app.NumMics;
+                app.IsApplyingPrefs = false;
+                app.StatusLabel.Text = 'Status: Change will take effect after restart';
+                return;
+            end
+
+            useDaq = checkDataAcqToolbox(app);
             
             % Adjust SelectedDeviceIDs array if number of mics changed
-            if newNumMics ~= app.NumMics
+            if ~useDaq && newNumMics ~= app.NumMics
                 if isempty(app.SelectedDeviceIDs) || length(app.SelectedDeviceIDs) < newNumMics
                     % Extend array with default device
                     try
@@ -1119,20 +1614,43 @@ classdef MicVisualizer < matlab.apps.AppBase
             if length(app.SplitInputs) ~= newNumMics
                 app.SplitInputs = false(newNumMics, 1);
             end
-            if ~app.IsRunning
-                initializeAudioRecorders(app);
-            else
-                app.StatusLabel.Text = 'Status: Change will take effect after restart';
-            end
+            initializeAudioRecorders(app);
+
+            savePreferences(app);
         end
         
         function SampleRateSpinnerValueChanged(app, event)
-            app.SampleRate = app.SampleRateSpinner.Value;
-            if ~app.IsRunning
-                initializeAudioRecorders(app);
-            else
-                app.StatusLabel.Text = 'Status: Change will take effect after restart';
+            newSampleRate = app.SampleRateSpinner.Value;
+            if app.IsApplyingPrefs
+                app.SampleRate = newSampleRate;
+                return;
             end
+            if app.IsRunning
+                app.IsApplyingPrefs = true;
+                app.SampleRateSpinner.Value = app.SampleRate;
+                app.IsApplyingPrefs = false;
+                app.StatusLabel.Text = 'Status: Change will take effect after restart';
+                return;
+            end
+            app.SampleRate = newSampleRate;
+            initializeAudioRecorders(app);
+            savePreferences(app);
+        end
+
+        function GainSliderValueChanged(app, event)
+            %#ok<INUSD>
+            if app.IsApplyingPrefs
+                return;
+            end
+            savePreferences(app);
+        end
+
+        function DisplayOptionValueChanged(app, event)
+            %#ok<INUSD>
+            if app.IsApplyingPrefs
+                return;
+            end
+            savePreferences(app);
         end
         
         % Button pushed function: SelectInputsButton
@@ -1152,6 +1670,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             baseHeight = 150;
             micHeight = 35;
             dialogHeight = min(600, baseHeight + numMics * micHeight); % Cap at 600px
+            useDaq = checkDataAcqToolbox(app);
             
             dialogFig = uifigure('Visible', 'off');
             dialogFig.Position = [400 300 500 dialogHeight];
@@ -1193,15 +1712,51 @@ classdef MicVisualizer < matlab.apps.AppBase
             
             % Function to refresh device list and update dropdowns
             function refreshDeviceList()
-                % Get available input devices (always refresh)
-                try
-                    info = audiodevinfo;
-                    inputDevices = info.input;
-                catch
-                    inputDevices = [];
+                inputDevices = [];
+                deviceNames = {};
+                deviceIDs = [];
+                deviceVendors = {};
+
+                if useDaq
+                    % Prefer DAQ device list when available
+                    try
+                        vendorsToTry = ["directsound", "wasapi"];
+                        for v = vendorsToTry
+                            try
+                                t = daqlist(v);
+                                if ~isempty(t)
+                                    for k = 1:height(t)
+                                        deviceNames{end+1,1} = sprintf('%s (%s:%s)', ...
+                                            t.Description(k), v, t.DeviceID(k));
+                                        deviceIDs{end+1,1} = char(t.DeviceID(k));
+                                        deviceVendors{end+1,1} = char(v);
+                                    end
+                                end
+                            catch
+                            end
+                        end
+                    catch
+                    end
+                else
+                    % Legacy device list
+                    try
+                        info = audiodevinfo;
+                        inputDevices = info.input;
+                    catch
+                        inputDevices = [];
+                    end
                 end
                 
-                if isempty(inputDevices)
+                if ~useDaq && ~isempty(inputDevices)
+                    deviceNames = cell(length(inputDevices), 1);
+                    deviceIDs = zeros(length(inputDevices), 1);
+                    for i = 1:length(inputDevices)
+                        deviceNames{i} = sprintf('%s (ID: %d)', inputDevices(i).Name, inputDevices(i).ID);
+                        deviceIDs(i) = inputDevices(i).ID;
+                    end
+                end
+
+                if isempty(deviceNames)
                     % Hide all dropdowns and labels, show error
                     for i = 1:numMics
                         if ~isempty(labels{i}) && isvalid(labels{i})
@@ -1236,24 +1791,24 @@ classdef MicVisualizer < matlab.apps.AppBase
                     errorLabels.Visible = 'off';
                 end
                 
-                % Create device name list
-                deviceNames = cell(length(inputDevices), 1);
-                deviceIDs = zeros(length(inputDevices), 1);
-                for i = 1:length(inputDevices)
-                    deviceNames{i} = sprintf('%s (ID: %d)', inputDevices(i).Name, inputDevices(i).ID);
-                    deviceIDs(i) = inputDevices(i).ID;
-                end
-                
-                % Initialize selected device IDs if empty
-                if isempty(app.SelectedDeviceIDs) || length(app.SelectedDeviceIDs) < numMics
-                    app.SelectedDeviceIDs = zeros(numMics, 1);
-                    for i = 1:min(numMics, length(inputDevices))
-                        app.SelectedDeviceIDs(i) = inputDevices(i).ID;
+                if useDaq
+                    % DAQ only supports one stream; show one dropdown and hide others
+                    if isempty(app.SelectedDataAcqDeviceId) && ~isempty(deviceIDs)
+                        app.SelectedDataAcqDeviceId = deviceIDs{1};
+                        app.SelectedDataAcqVendor = deviceVendors{1};
                     end
-                    % Fill remaining with first device
-                    if numMics > length(inputDevices)
-                        for i = length(inputDevices)+1:numMics
-                            app.SelectedDeviceIDs(i) = inputDevices(1).ID;
+                else
+                    % Initialize selected device IDs if empty
+                    if isempty(app.SelectedDeviceIDs) || length(app.SelectedDeviceIDs) < numMics
+                        app.SelectedDeviceIDs = zeros(numMics, 1);
+                        for i = 1:min(numMics, length(deviceIDs))
+                            app.SelectedDeviceIDs(i) = deviceIDs(i);
+                        end
+                        % Fill remaining with first device
+                        if numMics > length(deviceIDs)
+                            for i = length(deviceIDs)+1:numMics
+                                app.SelectedDeviceIDs(i) = deviceIDs(1);
+                            end
                         end
                     end
                 end
@@ -1263,14 +1818,22 @@ classdef MicVisualizer < matlab.apps.AppBase
                     % Create label if it doesn't exist
                     if isempty(labels{i}) || ~isvalid(labels{i})
                         labels{i} = uilabel(mainPanel);
-                        labels{i}.Text = sprintf('Microphone %d:', i);
+                        if useDaq && i == 1
+                            labels{i}.Text = 'Audio Input Device:';
+                        else
+                            labels{i}.Text = sprintf('Microphone %d:', i);
+                        end
                         labels{i}.FontName = 'Helvetica Neue';
                         labels{i}.FontSize = 11;
                         labels{i}.FontColor = app.WVUGold;
                         labels{i}.Position = [30 startY - (i-1)*spacing 120 22];
                         labels{i}.HorizontalAlignment = 'left';
                     end
-                    labels{i}.Visible = 'on';
+                    if useDaq && i > 1
+                        labels{i}.Visible = 'off';
+                    else
+                        labels{i}.Visible = 'on';
+                    end
                     
                     % Create or update dropdown
                     if isempty(dropdowns{i}) || ~isvalid(dropdowns{i})
@@ -1282,25 +1845,47 @@ classdef MicVisualizer < matlab.apps.AppBase
                     
                     % Update dropdown items with fresh device list
                     dropdowns{i}.Items = deviceNames;
-                    dropdowns{i}.Visible = 'on';
+                    if useDaq && i > 1
+                        dropdowns{i}.Visible = 'off';
+                    else
+                        dropdowns{i}.Visible = 'on';
+                    end
                     
                     % Set current selection (try to preserve if device still exists)
-                    currentID = app.SelectedDeviceIDs(i);
-                    idx = find(deviceIDs == currentID, 1);
-                    if ~isempty(idx)
-                        dropdowns{i}.Value = deviceNames{idx};
+                    if useDaq
+                        currentID = app.SelectedDataAcqDeviceId;
+                        idx = find(strcmp(deviceIDs, currentID), 1);
+                        if ~isempty(idx)
+                            dropdowns{i}.Value = deviceNames{idx};
+                        else
+                            if ~isempty(deviceNames)
+                                dropdowns{i}.Value = deviceNames{1};
+                                app.SelectedDataAcqDeviceId = deviceIDs{1};
+                                app.SelectedDataAcqVendor = deviceVendors{1};
+                            end
+                        end
                     else
-                        % Device no longer exists, select first available
-                        if ~isempty(deviceNames)
-                            dropdowns{i}.Value = deviceNames{1};
-                            app.SelectedDeviceIDs(i) = deviceIDs(1);
+                        currentID = app.SelectedDeviceIDs(i);
+                        idx = find(deviceIDs == currentID, 1);
+                        if ~isempty(idx)
+                            dropdowns{i}.Value = deviceNames{idx};
+                        else
+                            % Device no longer exists, select first available
+                            if ~isempty(deviceNames)
+                                dropdowns{i}.Value = deviceNames{1};
+                                app.SelectedDeviceIDs(i) = deviceIDs(1);
+                            end
                         end
                     end
                     
                     % Store device ID when changed - use a callback that looks up from current items
                     % This ensures it works even after refresh
                     micIdx = i; % Capture loop variable
-                    dropdowns{i}.ValueChangedFcn = @(src,~) updateDeviceIDFromDropdown(app, micIdx, src);
+                    if useDaq
+                        dropdowns{i}.ValueChangedFcn = @(src,~) updateDataAcqSelectionFromDropdown(app, src, deviceNames, deviceIDs, deviceVendors);
+                    else
+                        dropdowns{i}.ValueChangedFcn = @(src,~) updateDeviceIDFromDropdown(app, micIdx, src);
+                    end
                 end
             end
             
@@ -1366,6 +1951,16 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
             end
         end
+
+        function updateDataAcqSelectionFromDropdown(app, dropdown, deviceNames, deviceIDs, deviceVendors)
+            % Update DAQ device selection from dropdown list
+            selectedName = dropdown.Value;
+            idx = find(strcmp(deviceNames, selectedName), 1);
+            if ~isempty(idx)
+                app.SelectedDataAcqDeviceId = deviceIDs{idx};
+                app.SelectedDataAcqVendor = deviceVendors{idx};
+            end
+        end
         
         function closeDialog(app, dialogFig)
             % Reinitialize audio recorders with new device selections
@@ -1375,6 +1970,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             else
                 app.StatusLabel.Text = 'Status: Device changes will take effect after restart';
             end
+            savePreferences(app);
             delete(dialogFig);
         end
         
@@ -1459,6 +2055,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             if app.IsRunning
                 cleanupSplitAxes(app);
             end
+            savePreferences(app);
             delete(dialogFig);
         end
         
@@ -1538,6 +2135,13 @@ classdef MicVisualizer < matlab.apps.AppBase
         function UIFigureCloseRequest(app, event)
             % Force stop everything immediately - don't wait for anything
             app.IsRunning = false;
+            savePreferences(app);
+
+            % Clear app variable from base workspace if present
+            try
+                evalin('base', 'if exist(''app'', ''var''), clear app; end');
+            catch
+            end
             
             % Stop timer immediately
             if ~isempty(app.Timer) && isvalid(app.Timer)
@@ -1548,39 +2152,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                 catch
                 end
             end
-            
+
             % Stop all recorders/readers immediately
-            if app.UseAudioToolbox && ~isempty(app.AudioDeviceReaders)
-                for i = 1:length(app.AudioDeviceReaders)
-                    if isvalid(app.AudioDeviceReaders{i})
-                        try
-                            release(app.AudioDeviceReaders{i});
-                        catch
-                        end
-                        try
-                            delete(app.AudioDeviceReaders{i});
-                        catch
-                        end
-                    end
-                end
-                app.AudioDeviceReaders = {};
-            end
-            
-            if ~isempty(app.AudioRecorders)
-                for i = 1:length(app.AudioRecorders)
-                    if isvalid(app.AudioRecorders{i})
-                        try
-                            stop(app.AudioRecorders{i});
-                        catch
-                        end
-                        try
-                            delete(app.AudioRecorders{i});
-                        catch
-                        end
-                    end
-                end
-                app.AudioRecorders = {};
-            end
+            cleanupAudioResources(app);
             
             % Clean up split axes
             cleanupSplitAxes(app);
