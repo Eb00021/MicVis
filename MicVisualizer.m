@@ -1,6 +1,4 @@
 classdef MicVisualizer < matlab.apps.AppBase
-
-    % Properties that correspond to app components
     properties (Access = public)
         UIFigure                matlab.ui.Figure
         MainPanel               matlab.ui.container.Panel
@@ -33,49 +31,49 @@ classdef MicVisualizer < matlab.apps.AppBase
     end
     
     properties (Access = private)
-        AudioRecorders          % Cell array of audio recorder objects (legacy method)
-        AudioDeviceReaders      % Cell array of audioDeviceReader objects (Audio Toolbox method)
-        UseAudioToolbox = false % Flag to use Audio Toolbox if available
-        UseDataAcq = false      % Flag to use Data Acquisition Toolbox if available
-        DataAcqSession          % DataAcquisition object (DAQ audio)
-        DataAcqListener         % DataAvailable listener (DAQ audio)
-        Timer                   % Timer for updating visualization
-        IsRunning = false       % Flag to track if visualization is running
-        NumMics = 1             % Number of microphones
-        SampleRate = 44100      % Sample rate in Hz (default to 44.1kHz)
-        BufferSize = 4096       % Buffer size for audio capture
-        SelectedDeviceIDs = []  % Array of selected device IDs for each mic
-        SelectedDeviceNames = {} % Cell array of device names for Audio Toolbox
-        SelectedAudioDeviceName = '' % Selected Audio Toolbox device (single device)
-        SelectedAudioDriver = '' % Selected Audio Toolbox driver (e.g., ASIO)
-        SplitInputs = false(16,1)  % Boolean array indicating which inputs to split
-        SplitAxes = {}          % Cell array of axes for split displays
-        AudioHistory = {}       % Rolling history of recent audio frames for display
-        LegacyLastTotalSamples = 0 % Last total sample count (legacy)
-        LegacyNoDataCount = 0      % Consecutive no-data frames (legacy)
-        LegacyMaxNoDataFrames = 20 % Frames before attempting restart (legacy)
-        LegacyRestartCooldownSeconds = 2 % Restart cooldown (legacy)
-        LegacyRestartCooldownUntil = 0   % Next allowed restart time (legacy)
-        LegacyErrorShown = false % Track if legacy error shown
-        DataAcqNoDataCount = 0     % Consecutive no-data frames (DAQ)
-        DataAcqMaxNoDataFrames = 20 % Frames before warning (DAQ)
-        AppRootDir = ''          % Base directory for app assets
-        AppIconPath = ''         % Resolved app icon path for dialogs
-        AppFontName = 'Segoe UI' % App font name (fallback)
-        PrefsFilePath = ''      % Path to preferences file
-        IsApplyingPrefs = false % Avoid callbacks when loading prefs
-        SelectedDataAcqVendor = '' % Selected DAQ vendor (e.g., directsound)
-        SelectedDataAcqDeviceId = '' % Selected DAQ device id
-        ApplyInitialFftRange = false % One-time FFT y-range on startup
-        LogoImageOriginal = []  % Original logo image data (for theme swap)
-        LogoImageInverted = []  % Inverted logo image data (dark mode)
-        LogoImageSupportsInvert = false % True when raster logo loaded
-        LogoImageOriginalPath = '' % Source path for original logo
-        LogoImageInvertedPath = '' % Source path for inverted logo
-        WVUGold = [238, 170, 0] / 255      % WVU Gold color
-        WVUBlue = [0, 40, 85] / 255        % WVU Blue color
-        WVUBlueLight = [0, 60, 120] / 255  % Lighter WVU Blue
-        UseDarkMode = true                % Dark mode toggle for controls
+        AudioRecorders
+        AudioDeviceReaders
+        UseAudioToolbox = false
+        UseDataAcq = false
+        DataAcqSession
+        DataAcqListener
+        Timer
+        IsRunning = false
+        NumMics = 1
+        SampleRate = 44100
+        BufferSize = 4096
+        SelectedDeviceIDs = []
+        SelectedDeviceNames = {}
+        SelectedAudioDeviceName = ''
+        SelectedAudioDriver = ''
+        SplitInputs = false(16,1)
+        SplitAxes = {}
+        AudioHistory = {}
+        LegacyLastTotalSamples = 0
+        LegacyNoDataCount = 0
+        LegacyMaxNoDataFrames = 20
+        LegacyRestartCooldownSeconds = 2
+        LegacyRestartCooldownUntil = 0
+        LegacyErrorShown = false
+        DataAcqNoDataCount = 0
+        DataAcqMaxNoDataFrames = 20
+        AppRootDir = ''
+        AppIconPath = ''
+        AppFontName = 'Segoe UI'
+        PrefsFilePath = ''
+        IsApplyingPrefs = false
+        SelectedDataAcqVendor = ''
+        SelectedDataAcqDeviceId = ''
+        ApplyInitialFftRange = false
+        LogoImageOriginal = []
+        LogoImageInverted = []
+        LogoImageSupportsInvert = false
+        LogoImageOriginalPath = ''
+        LogoImageInvertedPath = ''
+        WVUGold = [238, 170, 0] / 255
+        WVUBlue = [0, 40, 85] / 255
+        WVUBlueLight = [0, 60, 120] / 255
+        UseDarkMode = true
         ThemeLight = struct( ...
             'Window', [0.94 0.96 0.98], ...
             'Panel', [0.96 0.97 0.99], ...
@@ -114,15 +112,14 @@ classdef MicVisualizer < matlab.apps.AppBase
             'ButtonSecondaryText', [0.08 0.10 0.14], ...
             'Success', [0.20 0.60 0.20], ...
             'Danger', [0.60 0.20 0.20]);
-        CurrentYLim = [-1, 1]              % Current Y-axis limits for smooth scaling
-        CurrentXLim = [0, 0.5]             % Current X-axis limits for smooth scaling
-        SmoothingFactor = 0.1              % Factor for smooth axis limit transitions (0-1, lower = smoother)
+        CurrentYLim = [-1, 1]
+        CurrentXLim = [0, 0.5]
+        SmoothingFactor = 0.1
     end
     
     methods (Access = private)
         
         function createComponents(app)
-            % Build UI in cohesive stages for readability and maintenance.
             initializeAppContext(app);
             createUIFigure(app);
             createMainPanel(app);
@@ -133,7 +130,6 @@ classdef MicVisualizer < matlab.apps.AppBase
         end
 
         function initializeAppContext(app)
-            % Resolve paths and UI font before any controls are created.
             app.AppRootDir = fileparts(mfilename('fullpath'));
             if isempty(app.AppRootDir)
                 app.AppRootDir = pwd;
@@ -142,7 +138,6 @@ classdef MicVisualizer < matlab.apps.AppBase
         end
 
         function createUIFigure(app)
-            % Create the top-level window and apply core configuration.
             app.UIFigure = uifigure('Visible', 'off');
             app.UIFigure.Position = [100 100 1200 800];
             if isprop(app.UIFigure, 'WindowState')
@@ -154,8 +149,6 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.UIFigure.Name = 'WVU EcoCAR - Microphone Audio Visualizer';
             app.UIFigure.Color = app.WVUBlue;
 
-            % Set icon - MATLAB uifigure.Icon supports: png, jpg, jpeg, gif, svg
-            % Try to convert .ico to .png if needed, or use alternative formats
             iconSet = false;
             iconCandidates = {'icon.png', 'icon.jpg', 'icon.jpeg', 'icon.gif', 'icon.svg'};
             for k = 1:numel(iconCandidates)
@@ -170,8 +163,6 @@ classdef MicVisualizer < matlab.apps.AppBase
             if ~iconSet
                 iconIco = resolveAppFile(app, 'icon.ico');
                 if ~isempty(iconIco)
-                    % Try to convert .ico to .png using imread/imwrite
-                    % Note: MATLAB's imread may not support ICO format
                     try
                         img = imread(iconIco);
                         iconPng = fullfile(app.AppRootDir, 'icon.png');
@@ -189,7 +180,6 @@ classdef MicVisualizer < matlab.apps.AppBase
 
             app.UIFigure.CloseRequestFcn = createCallbackFcn(app, @UIFigureCloseRequest, true);
 
-            % Enable OpenGL hardware acceleration
             try
                 opengl('hardware');
             catch
@@ -198,7 +188,6 @@ classdef MicVisualizer < matlab.apps.AppBase
         end
 
         function createMainPanel(app)
-            % Root panel used for consistent background and layout.
             app.MainPanel = uipanel(app.UIFigure);
             app.MainPanel.BackgroundColor = app.WVUBlue;
             app.MainPanel.Units = 'normalized';
@@ -206,7 +195,6 @@ classdef MicVisualizer < matlab.apps.AppBase
         end
 
         function createHeaderSection(app)
-            % Header contains the title and optional WVU logo.
             app.TitleLabel = uilabel(app.MainPanel);
             app.TitleLabel.Text = 'WVU EcoCAR EV Challenge - Microphone Visualizer';
             app.TitleLabel.FontName = app.AppFontName;
