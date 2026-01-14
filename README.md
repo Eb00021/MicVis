@@ -4,7 +4,7 @@ A real-time microphone audio visualizer application for the WVU EcoCAR EV Challe
 
 ## Features
 
-- **Multi-Microphone Support**: Adjustable number of microphones (1-16)
+- **Multi-Microphone Support**: Adjustable number of microphones (1-16), including 4-channel USB interfaces
 - **Real-Time Visualization**: Smooth waveform and FFT displays
 - **WVU Branding**: Official WVU colors (Old Gold and Blue) and Helvetica Neue font
 - **High Performance**: OpenGL hardware acceleration for smooth rendering
@@ -18,7 +18,8 @@ A real-time microphone audio visualizer application for the WVU EcoCAR EV Challe
 ## Requirements
 
 - MATLAB R2018b or later
-- Audio Toolbox (recommended)
+- Audio Toolbox (recommended for multi-channel USB interfaces)
+- Data Acquisition Toolbox (optional alternative for multi-channel interfaces)
 - Audio input device(s) (microphone(s))
 
 ## Installation
@@ -38,6 +39,7 @@ A real-time microphone audio visualizer application for the WVU EcoCAR EV Challe
    - Adjust sample rate if needed (default: 44100 Hz)
    - Set gain level using the slider
    - Choose display mode (Waveform, FFT, or both)
+    - For Behringer UMC404HD, set the number of microphones to 4
 3. **Start Visualization**: Click the "Start" button
 4. **Stop Visualization**: Click the "Stop" button when done
 
@@ -70,7 +72,7 @@ To add a custom icon for the application window:
 
 **No audio input detected:**
 - Check that your microphone is connected and recognized by Windows
-- Verify Audio Toolbox is installed
+- Verify Audio Toolbox is installed (required for many ASIO multi-channel devices)
 - Try reducing the number of microphones
 
 **Visualization is choppy:**

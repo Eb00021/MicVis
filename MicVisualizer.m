@@ -10,14 +10,22 @@ classdef MicVisualizer < matlab.apps.AppBase
         NumMicsLabel            matlab.ui.control.Label
         StartButton             matlab.ui.control.Button
         StopButton              matlab.ui.control.Button
+        FullscreenButton        matlab.ui.control.Button
         MicAxes                 matlab.ui.control.UIAxes
         StatusLabel             matlab.ui.control.Label
+        DarkModeLabel           matlab.ui.control.Label
+        DarkModeSwitch          matlab.ui.control.Switch
         WVULogo                 matlab.ui.control.Image
+        WVULogoHtml             matlab.ui.control.HTML
         TitleLabel              matlab.ui.control.Label
         FFTDisplayCheckBox      matlab.ui.control.CheckBox
         WaveformDisplayCheckBox matlab.ui.control.CheckBox
         GainSlider              matlab.ui.control.Slider
         GainLabel               matlab.ui.control.Label
+        GainValueLabel          matlab.ui.control.Label
+        YAxisRangeSlider        matlab.ui.control.Slider
+        YAxisRangeLabel         matlab.ui.control.Label
+        YAxisRangeValueLabel    matlab.ui.control.Label
         SampleRateLabel         matlab.ui.control.Label
         SampleRateSpinner       matlab.ui.control.Spinner
         SelectInputsButton       matlab.ui.control.Button
@@ -33,11 +41,13 @@ classdef MicVisualizer < matlab.apps.AppBase
         DataAcqListener         % DataAvailable listener (DAQ audio)
         Timer                   % Timer for updating visualization
         IsRunning = false       % Flag to track if visualization is running
-        NumMics = 4             % Number of microphones
-        SampleRate = 48000      % Sample rate in Hz (default to 48kHz for most modern mics)
+        NumMics = 1             % Number of microphones
+        SampleRate = 44100      % Sample rate in Hz (default to 44.1kHz)
         BufferSize = 4096       % Buffer size for audio capture
         SelectedDeviceIDs = []  % Array of selected device IDs for each mic
         SelectedDeviceNames = {} % Cell array of device names for Audio Toolbox
+        SelectedAudioDeviceName = '' % Selected Audio Toolbox device (single device)
+        SelectedAudioDriver = '' % Selected Audio Toolbox driver (e.g., ASIO)
         SplitInputs = false(16,1)  % Boolean array indicating which inputs to split
         SplitAxes = {}          % Cell array of axes for split displays
         AudioHistory = {}       % Rolling history of recent audio frames for display
@@ -49,144 +59,221 @@ classdef MicVisualizer < matlab.apps.AppBase
         LegacyErrorShown = false % Track if legacy error shown
         DataAcqNoDataCount = 0     % Consecutive no-data frames (DAQ)
         DataAcqMaxNoDataFrames = 20 % Frames before warning (DAQ)
+        AppRootDir = ''          % Base directory for app assets
+        AppIconPath = ''         % Resolved app icon path for dialogs
+        AppFontName = 'Segoe UI' % App font name (fallback)
         PrefsFilePath = ''      % Path to preferences file
         IsApplyingPrefs = false % Avoid callbacks when loading prefs
         SelectedDataAcqVendor = '' % Selected DAQ vendor (e.g., directsound)
         SelectedDataAcqDeviceId = '' % Selected DAQ device id
+        ApplyInitialFftRange = false % One-time FFT y-range on startup
+        LogoImageOriginal = []  % Original logo image data (for theme swap)
+        LogoImageInverted = []  % Inverted logo image data (dark mode)
+        LogoImageSupportsInvert = false % True when raster logo loaded
+        LogoImageOriginalPath = '' % Source path for original logo
+        LogoImageInvertedPath = '' % Source path for inverted logo
         WVUGold = [238, 170, 0] / 255      % WVU Gold color
         WVUBlue = [0, 40, 85] / 255        % WVU Blue color
         WVUBlueLight = [0, 60, 120] / 255  % Lighter WVU Blue
+        UseDarkMode = true                % Dark mode toggle for controls
+        ThemeLight = struct( ...
+            'Window', [0.94 0.96 0.98], ...
+            'Panel', [0.96 0.97 0.99], ...
+            'PanelAlt', [0.92 0.94 0.97], ...
+            'Border', [0.80 0.85 0.90], ...
+            'Text', [0.12 0.16 0.22], ...
+            'TextMuted', [0.35 0.40 0.46], ...
+            'Title', [0.10 0.14 0.20], ...
+            'Accent', [238, 170, 0] / 255, ...
+            'AccentText', [0.08 0.14 0.28], ...
+            'AxisBg', [1.00 1.00 1.00], ...
+            'AxisText', [0.12 0.16 0.22], ...
+            'AxisGrid', [0.85 0.88 0.92], ...
+            'SliderTrack', [0.25 0.30 0.38], ...
+            'SliderThumb', [0.94 0.94 0.98], ...
+            'ButtonSecondary', [238, 170, 0] / 255, ...
+            'ButtonSecondaryText', [0.08 0.14 0.28], ...
+            'Success', [0.20 0.60 0.20], ...
+            'Danger', [0.60 0.20 0.20]);
+        ThemeDark = struct( ...
+            'Window', [0.00 0.00 0.00], ...
+            'Panel', [0.05 0.05 0.07], ...
+            'PanelAlt', [0.08 0.08 0.10], ...
+            'Border', [0.20 0.20 0.20], ...
+            'Text', [0.90 0.92 0.96], ...
+            'TextMuted', [0.65 0.70 0.78], ...
+            'Title', [0.95 0.88 0.60], ...
+            'Accent', [238, 170, 0] / 255, ...
+            'AccentText', [0.08 0.10 0.14], ...
+            'AxisBg', [0.00 0.00 0.00], ...
+            'AxisText', [0.92 0.92 0.96], ...
+            'AxisGrid', [0.30 0.30 0.30], ...
+            'SliderTrack', [0.85 0.86 0.92], ...
+            'SliderThumb', [0.12 0.14 0.18], ...
+            'ButtonSecondary', [238, 170, 0] / 255, ...
+            'ButtonSecondaryText', [0.08 0.10 0.14], ...
+            'Success', [0.20 0.60 0.20], ...
+            'Danger', [0.60 0.20 0.20]);
+        CurrentYLim = [-1, 1]              % Current Y-axis limits for smooth scaling
+        CurrentXLim = [0, 0.5]             % Current X-axis limits for smooth scaling
+        SmoothingFactor = 0.1              % Factor for smooth axis limit transitions (0-1, lower = smoother)
     end
     
     methods (Access = private)
         
         function createComponents(app)
-            % Create UIFigure and components
+            % Build UI in cohesive stages for readability and maintenance.
+            initializeAppContext(app);
+            createUIFigure(app);
+            createMainPanel(app);
+            createHeaderSection(app);
+            createVisualizerSection(app);
+            createControlSection(app);
+            finalizeUI(app);
+        end
+
+        function initializeAppContext(app)
+            % Resolve paths and UI font before any controls are created.
+            app.AppRootDir = fileparts(mfilename('fullpath'));
+            if isempty(app.AppRootDir)
+                app.AppRootDir = pwd;
+            end
+            app.AppFontName = resolveAppFont(app);
+        end
+
+        function createUIFigure(app)
+            % Create the top-level window and apply core configuration.
             app.UIFigure = uifigure('Visible', 'off');
             app.UIFigure.Position = [100 100 1200 800];
+            if isprop(app.UIFigure, 'WindowState')
+                app.UIFigure.WindowState = 'normal';
+            end
+            if isprop(app.UIFigure, 'Resize')
+                app.UIFigure.Resize = 'on';
+            end
             app.UIFigure.Name = 'WVU EcoCAR - Microphone Audio Visualizer';
             app.UIFigure.Color = app.WVUBlue;
-            
+
             % Set icon - MATLAB uifigure.Icon supports: png, jpg, jpeg, gif, svg
             % Try to convert .ico to .png if needed, or use alternative formats
             iconSet = false;
-            if exist('icon.png', 'file')
-                app.UIFigure.Icon = 'icon.png';
-                iconSet = true;
-            elseif exist('icon.jpg', 'file') || exist('icon.jpeg', 'file')
-                if exist('icon.jpg', 'file')
-                    app.UIFigure.Icon = 'icon.jpg';
-                else
-                    app.UIFigure.Icon = 'icon.jpeg';
+            iconCandidates = {'icon.png', 'icon.jpg', 'icon.jpeg', 'icon.gif', 'icon.svg'};
+            for k = 1:numel(iconCandidates)
+                iconPath = resolveAppFile(app, iconCandidates{k});
+                if ~isempty(iconPath)
+                    app.UIFigure.Icon = iconPath;
+                    app.AppIconPath = iconPath;
+                    iconSet = true;
+                    break;
                 end
-                iconSet = true;
-            elseif exist('icon.gif', 'file')
-                app.UIFigure.Icon = 'icon.gif';
-                iconSet = true;
-            elseif exist('icon.svg', 'file')
-                app.UIFigure.Icon = 'icon.svg';
-                iconSet = true;
-            elseif exist('icon.ico', 'file')
-                % Try to convert .ico to .png using imread/imwrite
-                % Note: MATLAB's imread may not support ICO format
-                try
-                    % Try to read the ICO file (may work in some MATLAB versions)
-                    img = imread('icon.ico');
-                    % Write as PNG
-                    imwrite(img, 'icon.png');
-                    if exist('icon.png', 'file')
-                        app.UIFigure.Icon = 'icon.png';
-                        iconSet = true;
+            end
+            if ~iconSet
+                iconIco = resolveAppFile(app, 'icon.ico');
+                if ~isempty(iconIco)
+                    % Try to convert .ico to .png using imread/imwrite
+                    % Note: MATLAB's imread may not support ICO format
+                    try
+                        img = imread(iconIco);
+                        iconPng = fullfile(app.AppRootDir, 'icon.png');
+                        imwrite(img, iconPng);
+                        if exist(iconPng, 'file')
+                            app.UIFigure.Icon = iconPng;
+                            app.AppIconPath = iconPng;
+                            iconSet = true;
+                        end
+                    catch
+                        warning('Icon file icon.ico found but cannot be used directly. MATLAB uifigure.Icon requires PNG, JPG, GIF, or SVG format. Provide icon.png manually.');
                     end
-                catch
-                    % ICO format not supported by imread
-                    % Provide helpful message to user
-                    warning('Icon file icon.ico found but cannot be used directly. MATLAB uifigure.Icon requires PNG, JPG, GIF, or SVG format. Run convertIcon.m to convert, or provide icon.png manually.');
                 end
             end
-            
-            if ~iconSet && exist('icon.ico', 'file')
-                % Icon.ico exists but couldn't be used - user needs to convert
-                % (Warning already shown above)
-            end
-            
+
             app.UIFigure.CloseRequestFcn = createCallbackFcn(app, @UIFigureCloseRequest, true);
-            
+
             % Enable OpenGL hardware acceleration
             try
                 opengl('hardware');
             catch
                 warning('OpenGL hardware acceleration may not be available');
             end
-            
-            % Main Panel
+        end
+
+        function createMainPanel(app)
+            % Root panel used for consistent background and layout.
             app.MainPanel = uipanel(app.UIFigure);
             app.MainPanel.BackgroundColor = app.WVUBlue;
-            app.MainPanel.Position = [1 1 1200 800];
-            
-            % Title Label
+            app.MainPanel.Units = 'normalized';
+            app.MainPanel.Position = [0 0 1 1];
+        end
+
+        function createHeaderSection(app)
+            % Header contains the title and optional WVU logo.
             app.TitleLabel = uilabel(app.MainPanel);
             app.TitleLabel.Text = 'WVU EcoCAR EV Challenge - Microphone Visualizer';
-            app.TitleLabel.FontName = 'Helvetica Neue';
+            app.TitleLabel.FontName = app.AppFontName;
             app.TitleLabel.FontSize = 24;
             app.TitleLabel.FontWeight = 'bold';
             app.TitleLabel.FontColor = app.WVUGold;
-            app.TitleLabel.Position = [20 750 600 40];
+            app.TitleLabel.BackgroundColor = app.WVUBlue;
+            app.TitleLabel.Position = [20 750 760 40];
             app.TitleLabel.HorizontalAlignment = 'left';
-            
-            % WVU Logo
+
             app.WVULogo = uiimage(app.MainPanel);
-            app.WVULogo.Position = [1000 720 150 60];
+            app.WVULogo.Position = [800 746 120 44];
+            app.WVULogo.Visible = 'off';
+            app.WVULogoHtml = uihtml(app.MainPanel);
+            app.WVULogoHtml.Position = app.WVULogo.Position;
+            app.WVULogoHtml.Visible = 'off';
+
             % Try to load logo - MATLAB uiimage supports PNG/JPG/BMP/TIFF
-            % For SVG, we'll try it first, but may need conversion
             logoLoaded = false;
-            if exist('logo.svg', 'file')
-                try
-                    % Try SVG directly (may work in newer MATLAB versions)
-                    app.WVULogo.ImageSource = 'logo.svg';
-                    app.WVULogo.Visible = 'on';
-                    logoLoaded = true;
-                catch
-                    % SVG not supported, will try other formats below
+            logoPath = '';
+            invertedLogoPath = '';
+            logoCandidates = {'logo.png', 'logo.jpg', 'logo.jpeg', 'logo.bmp', 'logo.tif', 'logo.tiff', 'logo.svg'};
+            invertedCandidates = {'logoINV.png', 'logoINV.jpg', 'logoINV.jpeg', 'logoINV.bmp', 'logoINV.tif', 'logoINV.tiff', 'logoINV.svg'};
+            invertedLogoPath = findFirstExistingFile(app, invertedCandidates);
+            logoPath = findFirstExistingFile(app, logoCandidates);
+
+            if ~isempty(logoPath)
+                logoLoaded = setLogoSource(app, logoPath);
+            end
+            if ~logoLoaded && ~isempty(invertedLogoPath)
+                logoLoaded = setLogoSource(app, invertedLogoPath);
+                if logoLoaded
+                    logoPath = invertedLogoPath;
                 end
             end
-            if ~logoLoaded
-                % Try common raster formats
-                if exist('logo.png', 'file')
-                    app.WVULogo.ImageSource = 'logo.png';
-                    app.WVULogo.Visible = 'on';
-                    logoLoaded = true;
-                elseif exist('logo.jpg', 'file') || exist('logo.jpeg', 'file')
-                    if exist('logo.jpg', 'file')
-                        app.WVULogo.ImageSource = 'logo.jpg';
-                    else
-                        app.WVULogo.ImageSource = 'logo.jpeg';
+
+            if logoLoaded
+                app.LogoImageOriginalPath = logoPath;
+                app.LogoImageInvertedPath = invertedLogoPath;
+                [logoImg, canInvert] = tryLoadLogoImage(app, logoPath);
+                app.LogoImageOriginal = logoImg;
+                if canInvert
+                    app.LogoImageInverted = invertLogoImage(app, logoImg);
+                    app.LogoImageSupportsInvert = true;
+                else
+                    app.LogoImageSupportsInvert = false;
+                end
+            else
+                if ~isempty(invertedLogoPath) || ~isempty(logoPath)
+                    if endsWith(lower(string(invertedLogoPath)), ".svg") || endsWith(lower(string(logoPath)), ".svg")
+                        warning('SVG logo found but uiimage may not support it. Consider converting to PNG format.');
                     end
-                    app.WVULogo.Visible = 'on';
-                    logoLoaded = true;
-                elseif exist('logo.bmp', 'file')
-                    app.WVULogo.ImageSource = 'logo.bmp';
-                    app.WVULogo.Visible = 'on';
-                    logoLoaded = true;
                 end
             end
-            if ~logoLoaded && exist('logo.svg', 'file')
-                % If SVG exists but uiimage can't load it, provide helpful message
-                app.WVULogo.Visible = 'off';
-                warning('SVG logo found but uiimage may not support it. Consider converting to PNG format.');
-            end
-            
-            % Visualizer Panel
+        end
+
+        function createVisualizerSection(app)
+            % Main visualization panel and axes.
             app.VisualizerPanel = uipanel(app.MainPanel);
             app.VisualizerPanel.Title = 'Audio Visualization';
             app.VisualizerPanel.BackgroundColor = [0.1 0.1 0.15];
             app.VisualizerPanel.ForegroundColor = app.WVUGold;
-            app.VisualizerPanel.FontName = 'Helvetica Neue';
+            app.VisualizerPanel.FontName = app.AppFontName;
             app.VisualizerPanel.FontSize = 14;
             app.VisualizerPanel.FontWeight = 'bold';
             app.VisualizerPanel.Position = [20 100 900 620];
-            
-            % Main axes for visualization
+
             app.MicAxes = uiaxes(app.VisualizerPanel);
             app.MicAxes.Position = [20 20 860 570];
             app.MicAxes.BackgroundColor = [0.05 0.05 0.1];
@@ -196,7 +283,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.MicAxes.GridAlpha = 0.3;
             app.MicAxes.XGrid = 'on';
             app.MicAxes.YGrid = 'on';
-            app.MicAxes.FontName = 'Helvetica Neue';
+            app.MicAxes.FontName = app.AppFontName;
             app.MicAxes.XLabel.String = 'Time (s)';
             app.MicAxes.XLabel.Color = app.WVUGold;
             app.MicAxes.YLabel.String = 'Amplitude';
@@ -204,139 +291,623 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.MicAxes.Title.String = 'Real-Time Audio Waveform';
             app.MicAxes.Title.Color = app.WVUGold;
             app.MicAxes.Title.FontWeight = 'bold';
-            
-            % Control Panel
+        end
+
+        function createControlSection(app)
+            % Right-side controls for audio configuration and runtime actions.
             app.ControlPanel = uipanel(app.MainPanel);
             app.ControlPanel.Title = 'Controls';
             app.ControlPanel.BackgroundColor = app.WVUBlueLight;
             app.ControlPanel.ForegroundColor = app.WVUGold;
-            app.ControlPanel.FontName = 'Helvetica Neue';
+            app.ControlPanel.FontName = app.AppFontName;
             app.ControlPanel.FontSize = 14;
             app.ControlPanel.FontWeight = 'bold';
-            app.ControlPanel.Position = [940 100 240 620];
-            
+            app.ControlPanel.Position = [940 70 240 700];
+
             % Number of Microphones Spinner
             app.NumMicsLabel = uilabel(app.ControlPanel);
             app.NumMicsLabel.Text = 'Number of Mics:';
-            app.NumMicsLabel.FontName = 'Helvetica Neue';
+            app.NumMicsLabel.FontName = app.AppFontName;
             app.NumMicsLabel.FontSize = 12;
             app.NumMicsLabel.FontColor = app.WVUGold;
-            app.NumMicsLabel.Position = [20 560 120 22];
+            app.NumMicsLabel.Position = [20 650 140 22];
             app.NumMicsLabel.HorizontalAlignment = 'left';
-            
+
             app.NumMicsSpinner = uispinner(app.ControlPanel);
             app.NumMicsSpinner.Limits = [1 16];
-            app.NumMicsSpinner.Value = 4;
-            app.NumMicsSpinner.Position = [150 560 70 22];
+            app.NumMicsSpinner.Value = 1;
+            app.NumMicsSpinner.Position = [170 650 50 22];
             app.NumMicsSpinner.ValueChangedFcn = createCallbackFcn(app, @NumMicsSpinnerValueChanged, true);
-            
+
             % Sample Rate Spinner
             app.SampleRateLabel = uilabel(app.ControlPanel);
             app.SampleRateLabel.Text = 'Sample Rate (Hz):';
-            app.SampleRateLabel.FontName = 'Helvetica Neue';
+            app.SampleRateLabel.FontName = app.AppFontName;
             app.SampleRateLabel.FontSize = 12;
             app.SampleRateLabel.FontColor = app.WVUGold;
-            app.SampleRateLabel.Position = [20 530 120 22];
+            app.SampleRateLabel.Position = [20 615 140 22];
             app.SampleRateLabel.HorizontalAlignment = 'left';
-            
+
             app.SampleRateSpinner = uispinner(app.ControlPanel);
             app.SampleRateSpinner.Limits = [8000 192000];
-            app.SampleRateSpinner.Value = 48000;  % Default to 48kHz for most modern microphones
+            app.SampleRateSpinner.Value = 44100;  % Default to 44.1kHz
             app.SampleRateSpinner.Step = 1000;
-            app.SampleRateSpinner.Position = [150 530 70 22];
+            app.SampleRateSpinner.Position = [150 615 70 22];
             app.SampleRateSpinner.ValueDisplayFormat = '%.0f';  % Display as integer, no scientific notation
             app.SampleRateSpinner.ValueChangedFcn = createCallbackFcn(app, @SampleRateSpinnerValueChanged, true);
-            
+
             % Select Input Devices Button
             app.SelectInputsButton = uibutton(app.ControlPanel, 'push');
             app.SelectInputsButton.ButtonPushedFcn = createCallbackFcn(app, @SelectInputsButtonPushed, true);
             app.SelectInputsButton.Text = 'Select Input Devices';
-            app.SelectInputsButton.FontName = 'Helvetica Neue';
+            app.SelectInputsButton.FontName = app.AppFontName;
             app.SelectInputsButton.FontSize = 11;
             app.SelectInputsButton.FontWeight = 'bold';
             app.SelectInputsButton.BackgroundColor = app.WVUGold;
             app.SelectInputsButton.FontColor = app.WVUBlue;
-            app.SelectInputsButton.Position = [20 480 200 30];
-            
+            app.SelectInputsButton.Position = [20 570 200 32];
+
             % Gain Slider
             app.GainLabel = uilabel(app.ControlPanel);
             app.GainLabel.Text = 'Gain:';
-            app.GainLabel.FontName = 'Helvetica Neue';
+            app.GainLabel.FontName = app.AppFontName;
             app.GainLabel.FontSize = 12;
             app.GainLabel.FontColor = app.WVUGold;
-            app.GainLabel.Position = [20 430 120 22];
+            app.GainLabel.Position = [20 520 120 22];
             app.GainLabel.HorizontalAlignment = 'left';
-            
+
+            app.GainValueLabel = uilabel(app.ControlPanel);
+            app.GainValueLabel.Text = sprintf('%.2f', 1);
+            app.GainValueLabel.FontName = app.AppFontName;
+            app.GainValueLabel.FontSize = 11;
+            app.GainValueLabel.FontColor = app.WVUGold;
+            app.GainValueLabel.Position = [160 520 60 22];
+            app.GainValueLabel.HorizontalAlignment = 'right';
+
             app.GainSlider = uislider(app.ControlPanel);
             app.GainSlider.Limits = [0.1 5];
             app.GainSlider.Value = 1;
-            app.GainSlider.Position = [20 410 200 3];
+            app.GainSlider.Position = [20 505 200 3];
             app.GainSlider.ValueChangedFcn = createCallbackFcn(app, @GainSliderValueChanged, true);
-            
+            app.GainSlider.ValueChangingFcn = createCallbackFcn(app, @GainSliderValueChanging, true);
+
+            % Y-Axis Range Slider (constant y-limits for smoother updates)
+            app.YAxisRangeLabel = uilabel(app.ControlPanel);
+            app.YAxisRangeLabel.Text = 'Y Range (+/-):';
+            app.YAxisRangeLabel.FontName = app.AppFontName;
+            app.YAxisRangeLabel.FontSize = 12;
+            app.YAxisRangeLabel.FontColor = app.WVUGold;
+            app.YAxisRangeLabel.Position = [20 460 120 22];
+            app.YAxisRangeLabel.HorizontalAlignment = 'left';
+
+            app.YAxisRangeValueLabel = uilabel(app.ControlPanel);
+            app.YAxisRangeValueLabel.Text = '1.00';
+            app.YAxisRangeValueLabel.FontName = app.AppFontName;
+            app.YAxisRangeValueLabel.FontSize = 11;
+            app.YAxisRangeValueLabel.FontColor = app.WVUGold;
+            app.YAxisRangeValueLabel.Position = [160 460 60 22];
+            app.YAxisRangeValueLabel.HorizontalAlignment = 'right';
+
+            app.YAxisRangeSlider = uislider(app.ControlPanel);
+            app.YAxisRangeSlider.Limits = [0.1 5];
+            app.YAxisRangeSlider.Value = 1;
+            app.YAxisRangeSlider.Position = [20 450 200 3];
+            app.YAxisRangeSlider.ValueChangedFcn = createCallbackFcn(app, @YAxisRangeSliderValueChanged, true);
+            app.YAxisRangeSlider.ValueChangingFcn = createCallbackFcn(app, @YAxisRangeSliderValueChanging, true);
+
             % Display Options
             app.WaveformDisplayCheckBox = uicheckbox(app.ControlPanel);
             app.WaveformDisplayCheckBox.Text = 'Waveform Display';
-            app.WaveformDisplayCheckBox.FontName = 'Helvetica Neue';
+            app.WaveformDisplayCheckBox.FontName = app.AppFontName;
             app.WaveformDisplayCheckBox.FontSize = 12;
             app.WaveformDisplayCheckBox.FontColor = app.WVUGold;
             app.WaveformDisplayCheckBox.Value = true;
-            app.WaveformDisplayCheckBox.Position = [20 350 150 22];
+            app.WaveformDisplayCheckBox.Position = [20 405 150 22];
             app.WaveformDisplayCheckBox.ValueChangedFcn = createCallbackFcn(app, @DisplayOptionValueChanged, true);
-            
+
             app.FFTDisplayCheckBox = uicheckbox(app.ControlPanel);
             app.FFTDisplayCheckBox.Text = 'FFT Display';
-            app.FFTDisplayCheckBox.FontName = 'Helvetica Neue';
+            app.FFTDisplayCheckBox.FontName = app.AppFontName;
             app.FFTDisplayCheckBox.FontSize = 12;
             app.FFTDisplayCheckBox.FontColor = app.WVUGold;
             app.FFTDisplayCheckBox.Value = false;
-            app.FFTDisplayCheckBox.Position = [20 320 150 22];
+            app.FFTDisplayCheckBox.Position = [20 380 150 22];
             app.FFTDisplayCheckBox.ValueChangedFcn = createCallbackFcn(app, @DisplayOptionValueChanged, true);
-            
+
             % Split Graphs Button
             app.SplitGraphsButton = uibutton(app.ControlPanel, 'push');
             app.SplitGraphsButton.ButtonPushedFcn = createCallbackFcn(app, @SplitGraphsButtonPushed, true);
             app.SplitGraphsButton.Text = 'Configure Split Graphs';
-            app.SplitGraphsButton.FontName = 'Helvetica Neue';
+            app.SplitGraphsButton.FontName = app.AppFontName;
             app.SplitGraphsButton.FontSize = 11;
             app.SplitGraphsButton.FontWeight = 'bold';
             app.SplitGraphsButton.BackgroundColor = app.WVUGold;
             app.SplitGraphsButton.FontColor = app.WVUBlue;
-            app.SplitGraphsButton.Position = [20 280 200 30];
-            
+            app.SplitGraphsButton.Position = [20 330 200 30];
+
+            % Fullscreen Button
+            app.FullscreenButton = uibutton(app.ControlPanel, 'push');
+            app.FullscreenButton.ButtonPushedFcn = createCallbackFcn(app, @FullscreenButtonPushed, true);
+            app.FullscreenButton.Text = 'Fullscreen';
+            app.FullscreenButton.FontName = app.AppFontName;
+            app.FullscreenButton.FontSize = 11;
+            app.FullscreenButton.FontWeight = 'bold';
+            app.FullscreenButton.BackgroundColor = app.WVUGold;
+            app.FullscreenButton.FontColor = app.WVUBlue;
+            app.FullscreenButton.Position = [20 355 200 24];
+
             % Start Button
             app.StartButton = uibutton(app.ControlPanel, 'push');
             app.StartButton.ButtonPushedFcn = createCallbackFcn(app, @StartButtonPushed, true);
             app.StartButton.Text = 'Start';
-            app.StartButton.FontName = 'Helvetica Neue';
+            app.StartButton.FontName = app.AppFontName;
             app.StartButton.FontSize = 14;
             app.StartButton.FontWeight = 'bold';
             app.StartButton.BackgroundColor = [0.2 0.6 0.2];
             app.StartButton.FontColor = [1 1 1];
-            app.StartButton.Position = [20 240 200 40];
-            
+            app.StartButton.Position = [20 280 200 40];
+
             % Stop Button
             app.StopButton = uibutton(app.ControlPanel, 'push');
             app.StopButton.ButtonPushedFcn = createCallbackFcn(app, @StopButtonPushed, true);
             app.StopButton.Text = 'Stop';
-            app.StopButton.FontName = 'Helvetica Neue';
+            app.StopButton.FontName = app.AppFontName;
             app.StopButton.FontSize = 14;
             app.StopButton.FontWeight = 'bold';
             app.StopButton.BackgroundColor = [0.6 0.2 0.2];
             app.StopButton.FontColor = [1 1 1];
-            app.StopButton.Position = [20 180 200 40];
+            app.StopButton.Position = [20 230 200 40];
             app.StopButton.Enable = 'off';
-            
+
             % Status Label
             app.StatusLabel = uilabel(app.ControlPanel);
             app.StatusLabel.Text = 'Status: Ready';
-            app.StatusLabel.FontName = 'Helvetica Neue';
+            app.StatusLabel.FontName = app.AppFontName;
             app.StatusLabel.FontSize = 11;
             app.StatusLabel.FontColor = app.WVUGold;
-            app.StatusLabel.Position = [20 130 200 22];
+            app.StatusLabel.Position = [20 180 200 22];
             app.StatusLabel.HorizontalAlignment = 'left';
-            
-            % Show the figure after all components are created
+
+            % Dark Mode Toggle
+            app.DarkModeLabel = uilabel(app.ControlPanel);
+            app.DarkModeLabel.Text = 'Dark Mode';
+            app.DarkModeLabel.FontName = app.AppFontName;
+            app.DarkModeLabel.FontSize = 11;
+            app.DarkModeLabel.FontColor = app.WVUGold;
+            app.DarkModeLabel.Position = [20 140 120 22];
+            app.DarkModeLabel.HorizontalAlignment = 'left';
+
+            app.DarkModeSwitch = uiswitch(app.ControlPanel, 'slider');
+            app.DarkModeSwitch.Items = {'Light', 'Dark'};
+            app.DarkModeSwitch.Value = 'Dark';
+            app.DarkModeSwitch.Position = [150 140 70 22];
+            app.DarkModeSwitch.ValueChangedFcn = createCallbackFcn(app, @DarkModeSwitchValueChanged, true);
+        end
+
+        function finalizeUI(app)
+            % Apply theme and show window after all components exist.
+            applyTheme(app);
+            updateDisplayOptionState(app, []);
             app.UIFigure.Visible = 'on';
+        end
+
+        function colors = getThemeColors(app)
+            if app.UseDarkMode
+                colors = app.ThemeDark;
+            else
+                colors = app.ThemeLight;
+            end
+        end
+
+        function applyAxesTheme(app, ax)
+            if isempty(ax) || ~isvalid(ax)
+                return;
+            end
+            colors = getThemeColors(app);
+            if isprop(ax, 'BackgroundColor')
+                ax.BackgroundColor = colors.AxisBg;
+            end
+            if isprop(ax, 'Color')
+                ax.Color = colors.AxisBg;
+            end
+            ax.XColor = colors.AxisText;
+            ax.YColor = colors.AxisText;
+            ax.GridColor = colors.AxisGrid;
+            ax.GridAlpha = 0.3;
+            ax.XGrid = 'on';
+            ax.YGrid = 'on';
+            ax.XLabel.Color = colors.AxisText;
+            ax.YLabel.Color = colors.AxisText;
+            ax.Title.Color = colors.AxisText;
+        end
+
+        function applyTheme(app)
+            if isempty(app.UIFigure) || ~isvalid(app.UIFigure)
+                return;
+            end
+            colors = getThemeColors(app);
+
+            app.UIFigure.Color = colors.Window;
+            app.MainPanel.BackgroundColor = colors.Window;
+            app.MainPanel.BorderType = 'none';
+
+            app.TitleLabel.FontColor = colors.Title;
+            if isprop(app.TitleLabel, 'BackgroundColor')
+                app.TitleLabel.BackgroundColor = colors.Window;
+            end
+
+            app.VisualizerPanel.BackgroundColor = colors.Panel;
+            app.VisualizerPanel.ForegroundColor = colors.Text;
+            app.VisualizerPanel.BorderType = 'line';
+            if isprop(app.VisualizerPanel, 'BorderColor')
+                app.VisualizerPanel.BorderColor = colors.Border;
+            end
+
+            app.ControlPanel.BackgroundColor = colors.PanelAlt;
+            app.ControlPanel.ForegroundColor = colors.Text;
+            app.ControlPanel.BorderType = 'line';
+            if isprop(app.ControlPanel, 'BorderColor')
+                app.ControlPanel.BorderColor = colors.Border;
+            end
+
+            % Labels and toggles
+            labelHandles = {app.NumMicsLabel, app.SampleRateLabel, app.GainLabel, ...
+                app.GainValueLabel, app.YAxisRangeLabel, app.YAxisRangeValueLabel, ...
+                app.WaveformDisplayCheckBox, app.FFTDisplayCheckBox, app.StatusLabel, ...
+                app.DarkModeLabel};
+            for i = 1:numel(labelHandles)
+                if ~isempty(labelHandles{i}) && isvalid(labelHandles{i})
+                    labelHandles{i}.FontColor = colors.Text;
+                end
+            end
+
+            if ~isempty(app.NumMicsSpinner) && isvalid(app.NumMicsSpinner)
+                if isprop(app.NumMicsSpinner, 'FontColor')
+                    app.NumMicsSpinner.FontColor = colors.Text;
+                end
+                if isprop(app.NumMicsSpinner, 'BackgroundColor')
+                    app.NumMicsSpinner.BackgroundColor = colors.Panel;
+                end
+            end
+            if ~isempty(app.SampleRateSpinner) && isvalid(app.SampleRateSpinner)
+                if isprop(app.SampleRateSpinner, 'FontColor')
+                    app.SampleRateSpinner.FontColor = colors.Text;
+                end
+                if isprop(app.SampleRateSpinner, 'BackgroundColor')
+                    app.SampleRateSpinner.BackgroundColor = colors.Panel;
+                end
+            end
+
+            if ~isempty(app.DarkModeSwitch) && isvalid(app.DarkModeSwitch)
+                if isprop(app.DarkModeSwitch, 'FontColor')
+                    app.DarkModeSwitch.FontColor = colors.Text;
+                end
+            end
+
+            sliderHandles = {app.GainSlider, app.YAxisRangeSlider};
+            for i = 1:numel(sliderHandles)
+                slider = sliderHandles{i};
+                if ~isempty(slider) && isvalid(slider)
+                    if isprop(slider, 'FontColor')
+                        slider.FontColor = colors.Text;
+                    end
+                    if isprop(slider, 'BackgroundColor')
+                        slider.BackgroundColor = colors.Panel;
+                    end
+                    if isprop(slider, 'TrackColor')
+                        slider.TrackColor = colors.SliderTrack;
+                    end
+                    if isprop(slider, 'ThumbColor')
+                        slider.ThumbColor = colors.SliderThumb;
+                    end
+                end
+            end
+
+            % Buttons
+            app.SelectInputsButton.BackgroundColor = colors.ButtonSecondary;
+            app.SelectInputsButton.FontColor = colors.ButtonSecondaryText;
+            app.SplitGraphsButton.BackgroundColor = colors.ButtonSecondary;
+            app.SplitGraphsButton.FontColor = colors.ButtonSecondaryText;
+            app.FullscreenButton.BackgroundColor = colors.ButtonSecondary;
+            app.FullscreenButton.FontColor = colors.ButtonSecondaryText;
+            app.StartButton.BackgroundColor = colors.Success;
+            app.StartButton.FontColor = [1 1 1];
+            app.StopButton.BackgroundColor = colors.Danger;
+            app.StopButton.FontColor = [1 1 1];
+
+            if ~isempty(app.WVULogo) && isvalid(app.WVULogo)
+                if app.UseDarkMode
+                    if ~isempty(app.LogoImageInvertedPath)
+                        setLogoSource(app, app.LogoImageInvertedPath);
+                    elseif app.LogoImageSupportsInvert
+                        if ~isempty(app.WVULogoHtml) && isvalid(app.WVULogoHtml)
+                            app.WVULogoHtml.Visible = 'off';
+                        end
+                        app.WVULogo.ImageSource = app.LogoImageInverted;
+                        app.WVULogo.Visible = 'on';
+                    end
+                else
+                    if ~isempty(app.LogoImageOriginalPath)
+                        setLogoSource(app, app.LogoImageOriginalPath);
+                    elseif ~isempty(app.LogoImageOriginal)
+                        if ~isempty(app.WVULogoHtml) && isvalid(app.WVULogoHtml)
+                            app.WVULogoHtml.Visible = 'off';
+                        end
+                        app.WVULogo.ImageSource = app.LogoImageOriginal;
+                        app.WVULogo.Visible = 'on';
+                    end
+                end
+            end
+
+            % Axes theme
+            applyAxesTheme(app, app.MicAxes);
+            applyLegendTheme(app, app.MicAxes, colors);
+            if ~isempty(app.SplitAxes)
+                for i = 1:numel(app.SplitAxes)
+                    applyAxesTheme(app, app.SplitAxes{i});
+                end
+            end
+        end
+
+        function updateDisplayOptionState(app, sourceControl)
+            if nargin < 2
+                sourceControl = [];
+            end
+            if isempty(app.WaveformDisplayCheckBox) || isempty(app.FFTDisplayCheckBox)
+                return;
+            end
+            showWaveform = app.WaveformDisplayCheckBox.Value;
+            showFFT = app.FFTDisplayCheckBox.Value;
+
+            if showWaveform && showFFT
+                if ~isempty(sourceControl) && isvalid(sourceControl)
+                    if sourceControl == app.WaveformDisplayCheckBox
+                        app.FFTDisplayCheckBox.Value = false;
+                        showFFT = false;
+                    elseif sourceControl == app.FFTDisplayCheckBox
+                        app.WaveformDisplayCheckBox.Value = false;
+                        showWaveform = false;
+                    else
+                        app.FFTDisplayCheckBox.Value = false;
+                        showFFT = false;
+                    end
+                else
+                    app.FFTDisplayCheckBox.Value = false;
+                    showFFT = false;
+                end
+            end
+
+            if showWaveform
+                app.WaveformDisplayCheckBox.Enable = 'on';
+                app.FFTDisplayCheckBox.Enable = 'off';
+            elseif showFFT
+                app.WaveformDisplayCheckBox.Enable = 'off';
+                app.FFTDisplayCheckBox.Enable = 'on';
+            else
+                app.WaveformDisplayCheckBox.Enable = 'on';
+                app.FFTDisplayCheckBox.Enable = 'on';
+            end
+        end
+
+        function filePath = resolveAppFile(app, fileName)
+            filePath = '';
+            if isempty(fileName)
+                return;
+            end
+            baseDir = app.AppRootDir;
+            if isempty(baseDir)
+                baseDir = pwd;
+            end
+            candidate = fullfile(baseDir, fileName);
+            if exist(candidate, 'file')
+                filePath = candidate;
+            end
+        end
+
+        function filePath = findFirstExistingFile(app, fileNames)
+            filePath = '';
+            if isempty(fileNames)
+                return;
+            end
+            for k = 1:numel(fileNames)
+                candidate = resolveAppFile(app, fileNames{k});
+                if ~isempty(candidate)
+                    filePath = candidate;
+                    return;
+                end
+            end
+        end
+
+        function wasSet = setLogoSource(app, imagePath)
+            wasSet = false;
+            if isempty(imagePath)
+                return;
+            end
+            [~, ~, ext] = fileparts(imagePath);
+            if strcmpi(ext, '.svg')
+                wasSet = setSvgLogo(app, imagePath);
+                return;
+            end
+            if isempty(app.WVULogo) || ~isvalid(app.WVULogo)
+                return;
+            end
+            try
+                app.WVULogo.ImageSource = imagePath;
+                app.WVULogo.Visible = 'on';
+                if ~isempty(app.WVULogoHtml) && isvalid(app.WVULogoHtml)
+                    app.WVULogoHtml.Visible = 'off';
+                end
+                wasSet = true;
+            catch
+                wasSet = false;
+            end
+        end
+
+        function wasSet = setSvgLogo(app, svgPath)
+            wasSet = false;
+            if isempty(app.WVULogoHtml) || ~isvalid(app.WVULogoHtml)
+                return;
+            end
+            htmlPath = ensureSvgHtml(app, svgPath);
+            if isempty(htmlPath)
+                return;
+            end
+            try
+                app.WVULogoHtml.HTMLSource = htmlPath;
+                app.WVULogoHtml.Visible = 'on';
+                if ~isempty(app.WVULogo) && isvalid(app.WVULogo)
+                    app.WVULogo.Visible = 'off';
+                end
+                wasSet = true;
+            catch
+                wasSet = false;
+            end
+        end
+
+        function htmlPath = ensureSvgHtml(app, svgPath)
+            htmlPath = '';
+            if isempty(svgPath)
+                return;
+            end
+            try
+                svgText = fileread(svgPath);
+            catch
+                return;
+            end
+            [~, name, ~] = fileparts(svgPath);
+            htmlPath = fullfile(app.AppRootDir, sprintf('%s_svg.html', name));
+            html = [
+                "<html><head><meta charset=""utf-8"">" ...
+                "<style>html,body{margin:0;padding:0;width:100%;height:100%;background:transparent;overflow:hidden;}" ...
+                "svg{width:100%;height:100%;}</style></head><body>" ...
+                svgText ...
+                "</body></html>"
+            ];
+            try
+                fid = fopen(htmlPath, 'w');
+                if fid < 0
+                    htmlPath = '';
+                    return;
+                end
+                fwrite(fid, html);
+                fclose(fid);
+            catch
+                htmlPath = '';
+            end
+        end
+
+        function iconVal = getDialogIcon(app, fallback)
+            iconVal = fallback;
+            iconPath = '';
+            if ~isempty(app.UIFigure) && isvalid(app.UIFigure)
+                iconPath = app.UIFigure.Icon;
+            end
+            if isempty(iconPath) && ~isempty(app.AppIconPath)
+                iconPath = app.AppIconPath;
+            end
+            if ~isempty(iconPath)
+                iconVal = iconPath;
+            end
+        end
+
+        function applyDialogIcon(app, dialogFig)
+            if isempty(dialogFig) || ~isvalid(dialogFig)
+                return;
+            end
+            iconPath = getDialogIcon(app, '');
+            if ~isempty(iconPath)
+                try
+                    dialogFig.Icon = iconPath;
+                catch
+                end
+            end
+        end
+
+        function plotColors = getChannelColors(app, numChannels)
+            if numChannels < 1
+                plotColors = zeros(0, 3);
+                return;
+            end
+            if app.UseDarkMode
+                plotColors = parula(numChannels);
+                plotColors = 0.15 + 0.85 * plotColors;
+            else
+                plotColors = lines(numChannels);
+            end
+        end
+
+        function applyLegendTheme(app, ax, colors)
+            if isempty(ax) || ~isvalid(ax)
+                return;
+            end
+            lgd = [];
+            if isprop(ax, 'Legend')
+                lgd = ax.Legend;
+            end
+            if ~isempty(lgd) && isvalid(lgd)
+                if isprop(lgd, 'TextColor')
+                    lgd.TextColor = colors.AxisText;
+                end
+                if isprop(lgd, 'Color')
+                    lgd.Color = colors.AxisBg;
+                end
+                if isprop(lgd, 'EdgeColor')
+                    lgd.EdgeColor = colors.Border;
+                end
+            end
+        end
+
+        function [img, canInvert] = tryLoadLogoImage(app, logoPath)
+            %#ok<INUSD>
+            img = [];
+            canInvert = false;
+            if isempty(logoPath)
+                return;
+            end
+            [~, ~, ext] = fileparts(logoPath);
+            if strcmpi(ext, '.svg')
+                return;
+            end
+            try
+                [raw, ~, alpha] = imread(logoPath);
+                if isempty(raw)
+                    return;
+                end
+                if size(raw, 3) == 1
+                    raw = repmat(raw, 1, 1, 3);
+                end
+                if ~isempty(alpha)
+                    raw = cat(3, raw, alpha);
+                end
+                img = raw;
+                canInvert = true;
+            catch
+                img = [];
+                canInvert = false;
+            end
+        end
+
+        function imgInv = invertLogoImage(app, img)
+            %#ok<INUSD>
+            imgInv = img;
+            if isempty(img)
+                return;
+            end
+            if size(img, 3) < 3
+                return;
+            end
+            rgb = img(:, :, 1:3);
+            if isa(rgb, 'uint8')
+                rgbInv = 255 - rgb;
+            elseif isa(rgb, 'uint16')
+                rgbInv = 65535 - rgb;
+            elseif isfloat(rgb)
+                rgbInv = 1 - rgb;
+            else
+                rgbInv = 1 - double(rgb);
+                rgbInv = cast(rgbInv, class(rgb));
+            end
+            imgInv(:, :, 1:3) = rgbInv;
         end
         
         function recorder = createRecorderWithFallback(app, deviceID)
@@ -401,13 +972,39 @@ classdef MicVisualizer < matlab.apps.AppBase
         
         function hasToolbox = checkAudioToolbox(app)
             % Check if Audio Toolbox is available
-            hasToolbox = license('test', 'Audio_Toolbox') && exist('audioDeviceReader', 'class');
+            hasToolbox = false;
+            try
+                hasToolbox = license('test', 'Audio_Toolbox');
+            catch
+            end
+            if ~hasToolbox
+                try
+                    hasToolbox = ~isempty(ver('audio'));
+                catch
+                end
+            end
+            if ~hasToolbox
+                hasToolbox = exist('audioDeviceReader', 'class') == 8 || exist('audioDeviceReader', 'file') == 2;
+            end
             app.UseAudioToolbox = hasToolbox;
         end
 
         function hasToolbox = checkDataAcqToolbox(app)
             % Check if Data Acquisition Toolbox is available
-            hasToolbox = license('test', 'Data_Acq_Toolbox') && (exist('daq', 'file') == 2 || exist('daq', 'class') == 8);
+            hasToolbox = false;
+            try
+                hasToolbox = license('test', 'Data_Acq_Toolbox');
+            catch
+            end
+            if ~hasToolbox
+                try
+                    hasToolbox = ~isempty(ver('daq'));
+                catch
+                end
+            end
+            if ~hasToolbox
+                hasToolbox = exist('daq', 'file') == 2 || exist('daq', 'class') == 8;
+            end
             if hasToolbox && exist('daqvendorlist', 'file') == 2
                 try
                     if isempty(getOperationalDaqVendor(app))
@@ -467,6 +1064,100 @@ classdef MicVisualizer < matlab.apps.AppBase
             end
         end
 
+        function fontName = resolveAppFont(app)
+            fontName = app.AppFontName;
+            fontsDir = fullfile(app.AppRootDir, 'fonts');
+            if exist(fontsDir, 'dir') ~= 7
+                return;
+            end
+
+            preferred = {'HelveticaNeueHeavy.otf', 'HelveticaNeueHeavy.ttf'};
+            fontPath = '';
+            for i = 1:numel(preferred)
+                candidate = fullfile(fontsDir, preferred{i});
+                if exist(candidate, 'file') == 2
+                    fontPath = candidate;
+                    break;
+                end
+            end
+
+            if isempty(fontPath)
+                files = dir(fullfile(fontsDir, '*.otf'));
+                if isempty(files)
+                    files = dir(fullfile(fontsDir, '*.ttf'));
+                end
+                if ~isempty(files)
+                    fontPath = fullfile(fontsDir, files(1).name);
+                end
+            end
+
+            if isempty(fontPath)
+                return;
+            end
+
+            [loadedName, loadedOk] = tryRegisterFont(app, fontPath);
+            if loadedOk && ~isempty(loadedName)
+                fontName = loadedName;
+            end
+        end
+
+        function [fontName, loadedOk] = tryRegisterFont(app, fontPath)
+            %#ok<INUSD>
+            fontName = '';
+            loadedOk = false;
+            fontList = {};
+            try
+                fontList = listfonts;
+            catch
+            end
+
+            if exist('matlab.internal.fonts.addFont', 'file') == 2
+                try
+                    added = matlab.internal.fonts.addFont(fontPath);
+                    if ~isempty(added)
+                        fontName = char(added);
+                    end
+                catch
+                end
+            end
+
+            if isempty(fontName) && exist('matlab.graphics.internal.fonts.addFont', 'file') == 2
+                try
+                    added = matlab.graphics.internal.fonts.addFont(fontPath);
+                    if ~isempty(added)
+                        fontName = char(added);
+                    end
+                catch
+                end
+            end
+
+            if isempty(fontName)
+                try
+                    jFont = java.awt.Font.createFont(java.awt.Font.TRUETYPE_FONT, java.io.File(fontPath));
+                    ge = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment();
+                    ge.registerFont(jFont);
+                    fontName = char(jFont.getFamily());
+                catch
+                end
+            end
+
+            try
+                fontList = listfonts;
+            catch
+            end
+
+            if ~isempty(fontName) && ~isempty(fontList)
+                loadedOk = any(strcmpi(fontList, fontName));
+                if ~loadedOk
+                    matches = find(contains(lower(string(fontList)), lower(string(fontName))), 1);
+                    if ~isempty(matches)
+                        fontName = fontList{matches};
+                        loadedOk = true;
+                    end
+                end
+            end
+        end
+
         function prefsPath = getPrefsFilePath(app)
             %#ok<INUSD>
             prefsPath = fullfile(tempdir, 'MicVisualizerPrefs.mat');
@@ -495,6 +1186,12 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
                 if isfield(prefs, 'Gain')
                     app.GainSlider.Value = prefs.Gain;
+                    updateGainLabel(app, prefs.Gain);
+                end
+                if isfield(prefs, 'YAxisRange')
+                    yRange = max(app.YAxisRangeSlider.Limits(1), min(app.YAxisRangeSlider.Limits(2), prefs.YAxisRange));
+                    app.YAxisRangeSlider.Value = yRange;
+                    updateYAxisRangeLabel(app, yRange);
                 end
                 if isfield(prefs, 'WaveformDisplay')
                     app.WaveformDisplayCheckBox.Value = logical(prefs.WaveformDisplay);
@@ -502,6 +1199,7 @@ classdef MicVisualizer < matlab.apps.AppBase
                 if isfield(prefs, 'FFTDisplay')
                     app.FFTDisplayCheckBox.Value = logical(prefs.FFTDisplay);
                 end
+                updateDisplayOptionState(app, []);
                 if isfield(prefs, 'SplitInputs')
                     split = logical(prefs.SplitInputs(:));
                     if length(split) ~= app.NumMics
@@ -517,11 +1215,28 @@ classdef MicVisualizer < matlab.apps.AppBase
                 if isfield(prefs, 'SelectedDeviceNames')
                     app.SelectedDeviceNames = prefs.SelectedDeviceNames;
                 end
+                if isfield(prefs, 'SelectedAudioDeviceName')
+                    app.SelectedAudioDeviceName = char(prefs.SelectedAudioDeviceName);
+                end
+                if isfield(prefs, 'SelectedAudioDriver')
+                    app.SelectedAudioDriver = char(prefs.SelectedAudioDriver);
+                end
                 if isfield(prefs, 'SelectedDataAcqVendor')
                     app.SelectedDataAcqVendor = char(prefs.SelectedDataAcqVendor);
                 end
                 if isfield(prefs, 'SelectedDataAcqDeviceId')
                     app.SelectedDataAcqDeviceId = char(prefs.SelectedDataAcqDeviceId);
+                end
+                if isfield(prefs, 'UseDarkMode')
+                    app.UseDarkMode = logical(prefs.UseDarkMode);
+                    if ~isempty(app.DarkModeSwitch) && isvalid(app.DarkModeSwitch)
+                        if app.UseDarkMode
+                            app.DarkModeSwitch.Value = 'Dark';
+                        else
+                            app.DarkModeSwitch.Value = 'Light';
+                        end
+                    end
+                    applyTheme(app);
                 end
             catch
                 % Ignore prefs load errors
@@ -535,13 +1250,17 @@ classdef MicVisualizer < matlab.apps.AppBase
                 prefs.NumMics = app.NumMics;
                 prefs.SampleRate = app.SampleRate;
                 prefs.Gain = app.GainSlider.Value;
+                prefs.YAxisRange = app.YAxisRangeSlider.Value;
                 prefs.WaveformDisplay = app.WaveformDisplayCheckBox.Value;
                 prefs.FFTDisplay = app.FFTDisplayCheckBox.Value;
                 prefs.SplitInputs = app.SplitInputs;
                 prefs.SelectedDeviceIDs = app.SelectedDeviceIDs;
                 prefs.SelectedDeviceNames = app.SelectedDeviceNames;
+                prefs.SelectedAudioDeviceName = app.SelectedAudioDeviceName;
+                prefs.SelectedAudioDriver = app.SelectedAudioDriver;
                 prefs.SelectedDataAcqVendor = app.SelectedDataAcqVendor;
                 prefs.SelectedDataAcqDeviceId = app.SelectedDataAcqDeviceId;
+                prefs.UseDarkMode = app.UseDarkMode;
                 save(prefsPath, 'prefs');
             catch
                 % Ignore prefs save errors
@@ -690,11 +1409,20 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
 
                 dq = daq(vendorName);
+                channelCount = max(1, min(app.NumMics, 16));
                 if ~isempty(deviceId)
-                    addinput(dq, deviceId, 1, "Audio");
+                    try
+                        addinput(dq, deviceId, 1:channelCount, "Audio");
+                    catch
+                        addinput(dq, deviceId, 1, "Audio");
+                    end
                 else
                     % Fall back to first available device for vendor
-                    addinput(dq, "Audio1", 1, "Audio");
+                    try
+                        addinput(dq, "Audio1", 1:channelCount, "Audio");
+                    catch
+                        addinput(dq, "Audio1", 1, "Audio");
+                    end
                 end
 
                 dq.Rate = app.SampleRate;
@@ -752,10 +1480,32 @@ classdef MicVisualizer < matlab.apps.AppBase
                 frameData = frameData * app.GainSlider.Value;
 
                 maxHistorySamples = round(app.SampleRate * 0.5);
-                for micIdx = 1:app.NumMics
-                    app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:)];
-                    if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                        app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                numChannels = size(frameData, 2);
+                if numChannels <= 1 && app.NumMics > 1
+                    % Duplicate single channel for multiple mic displays
+                    for micIdx = 1:app.NumMics
+                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:)];
+                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
+                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                        end
+                    end
+                else
+                    channelsToUse = min(app.NumMics, numChannels);
+                    for micIdx = 1:channelsToUse
+                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:, micIdx)];
+                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
+                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                        end
+                    end
+                    if channelsToUse < app.NumMics && channelsToUse > 0
+                        % Duplicate last available channel for remaining displays
+                        lastChannel = frameData(:, channelsToUse);
+                        for micIdx = (channelsToUse + 1):app.NumMics
+                            app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; lastChannel];
+                            if length(app.AudioHistory{micIdx}) > maxHistorySamples
+                                app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                            end
+                        end
                     end
                 end
             catch
@@ -782,14 +1532,29 @@ classdef MicVisualizer < matlab.apps.AppBase
                 
                 % Get available devices using non-blocking audiodevinfo
                 deviceToUse = '';
+                driverToUse = '';
                 try
                     info = audiodevinfo;
                     inputDevices = info.input;
                     if ~isempty(inputDevices)
-                        if ~isempty(app.SelectedDeviceNames) && length(app.SelectedDeviceNames) >= 1
-                            deviceToUse = app.SelectedDeviceNames{1};
-                        else
-                            deviceToUse = inputDevices(1).Name;
+                        % Prefer selected device ID if available (from input dialog)
+                        if ~isempty(app.SelectedDeviceIDs)
+                            matchIdx = find([inputDevices.ID] == app.SelectedDeviceIDs(1), 1);
+                            if ~isempty(matchIdx)
+                                deviceToUse = inputDevices(matchIdx).Name;
+                            end
+                        end
+                        % Fall back to selected device name or first device
+                        if isempty(deviceToUse)
+                            if ~isempty(app.SelectedAudioDeviceName)
+                                deviceToUse = app.SelectedAudioDeviceName;
+                                driverToUse = app.SelectedAudioDriver;
+                            end
+                            if ~isempty(app.SelectedDeviceNames) && length(app.SelectedDeviceNames) >= 1
+                                deviceToUse = app.SelectedDeviceNames{1};
+                            else
+                                deviceToUse = inputDevices(1).Name;
+                            end
                         end
                     end
                 catch
@@ -800,22 +1565,45 @@ classdef MicVisualizer < matlab.apps.AppBase
                 % Frame size: 1024 samples is standard for real-time processing
                 samplesPerFrame = 1024;
                 
+                desiredChannels = max(1, min(app.NumMics, 16));
+                reader = [];
                 try
                     if ~isempty(deviceToUse)
                         reader = audioDeviceReader(...
+                            'Driver', driverToUse, ...
                             'Device', deviceToUse, ...
                             'SampleRate', app.SampleRate, ...
-                            'SamplesPerFrame', samplesPerFrame);
+                            'SamplesPerFrame', samplesPerFrame, ...
+                            'NumChannels', desiredChannels);
                     else
+                        reader = audioDeviceReader(...
+                            'Driver', driverToUse, ...
+                            'SampleRate', app.SampleRate, ...
+                            'SamplesPerFrame', samplesPerFrame, ...
+                            'NumChannels', desiredChannels);
+                    end
+                catch
+                end
+                if isempty(reader)
+                    try
+                        if ~isempty(deviceToUse)
+                            reader = audioDeviceReader(...
+                                'Driver', driverToUse, ...
+                                'Device', deviceToUse, ...
+                                'SampleRate', app.SampleRate, ...
+                                'SamplesPerFrame', samplesPerFrame);
+                        else
+                            reader = audioDeviceReader(...
+                                'Driver', driverToUse, ...
+                                'SampleRate', app.SampleRate, ...
+                                'SamplesPerFrame', samplesPerFrame);
+                        end
+                    catch
+                        % Fallback to default device
                         reader = audioDeviceReader(...
                             'SampleRate', app.SampleRate, ...
                             'SamplesPerFrame', samplesPerFrame);
                     end
-                catch
-                    % Fallback to default device
-                    reader = audioDeviceReader(...
-                        'SampleRate', app.SampleRate, ...
-                        'SamplesPerFrame', samplesPerFrame);
                 end
                 
                 app.AudioDeviceReaders{1} = reader;
@@ -829,7 +1617,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             catch ME
                 errorMsg = ME.message;
                 app.StatusLabel.Text = sprintf('Status: Error - %s', ME.message);
-                uialert(app.UIFigure, sprintf('Error initializing audio:\n\n%s', errorMsg), 'Audio Error', 'Icon', 'error');
+                uialert(app.UIFigure, sprintf('Error initializing audio:\n\n%s', errorMsg), 'Audio Error', 'Icon', getDialogIcon(app, 'error'));
                 throw(ME);
             end
         end
@@ -917,7 +1705,7 @@ classdef MicVisualizer < matlab.apps.AppBase
                     errorMsg = sprintf('%s\n\nMake sure your microphone is connected and not being used by another application.', errorMsg);
                 end
                 app.StatusLabel.Text = sprintf('Status: Error - %s', ME.message);
-                uialert(app.UIFigure, sprintf('Error initializing audio:\n\n%s', errorMsg), 'Audio Error', 'Icon', 'error');
+                uialert(app.UIFigure, sprintf('Error initializing audio:\n\n%s', errorMsg), 'Audio Error', 'Icon', getDialogIcon(app, 'error'));
             end
         end
 
@@ -1026,16 +1814,18 @@ classdef MicVisualizer < matlab.apps.AppBase
                 % Update UI immediately
                 app.StartButton.Enable = 'off';
                 app.StopButton.Enable = 'on';
+            setControlsForRunning(app, true);
+                drawnow; % Allow UI to update before starting timer
                 
                 % Create timer for real-time visualization
                 % Following MathWorks pattern: read frames and display immediately
                 warning('off', 'MATLAB:audiorecorder:timeout');
                 warning('off', 'matlabshared:asyncio:timeout');
                 
-                % Timer period: update at ~20 FPS for smooth visualization
+                % Timer period: update at ~25 FPS for smoother visualization
                 % For audioDeviceReader with 1024 samples at 48kHz: ~21ms per frame
-                % Timer at 50ms ensures we don't miss frames
-                timerPeriod = 0.05;  % 50ms = 20 FPS
+                % Timer at 40ms balances smoothness and missed frames
+                timerPeriod = 0.04;  % 40ms = 25 FPS
                 
                 app.Timer = timer('ExecutionMode', 'fixedRate', ...
                     'Period', timerPeriod, ...
@@ -1051,8 +1841,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                 
             catch ME
                 app.StatusLabel.Text = sprintf('Status: Error - %s', ME.message);
-                uialert(app.UIFigure, sprintf('Error starting visualization: %s', ME.message), 'Error');
+                uialert(app.UIFigure, sprintf('Error starting visualization: %s', ME.message), 'Error', 'Icon', getDialogIcon(app, 'error'));
                 app.IsRunning = false;
+                setControlsForRunning(app, false);
             end
         end
         
@@ -1060,16 +1851,31 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Force stop - don't wait for anything
             app.IsRunning = false;
             
-            % Update UI
-            app.StartButton.Enable = 'on';
-            app.StopButton.Enable = 'off';
-            app.StatusLabel.Text = 'Status: Stopped';
+            % Update UI immediately
+            try
+                if isvalid(app.StartButton)
+                    app.StartButton.Enable = 'on';
+                end
+                if isvalid(app.StopButton)
+                    app.StopButton.Enable = 'off';
+                end
+                if isvalid(app.StatusLabel)
+                    app.StatusLabel.Text = 'Status: Stopped';
+                end
+                setControlsForRunning(app, false);
+                if isvalid(app.UIFigure)
+                    drawnow; % Allow UI to update immediately
+                end
+            catch
+            end
             
             % Clear axes and cleanup split axes
             try
-                cla(app.MicAxes);
-                cleanupSplitAxes(app);
-                app.MicAxes.Visible = 'on';
+                if isvalid(app.MicAxes)
+                    cla(app.MicAxes);
+                    cleanupSplitAxes(app);
+                    app.MicAxes.Visible = 'on';
+                end
             catch
             end
 
@@ -1128,6 +1934,81 @@ classdef MicVisualizer < matlab.apps.AppBase
             app.LegacyErrorShown = false;
         end
         
+        function updateSmoothAxisLimits(app, ax, timeData, audioData, isCombined)
+            % Smoothly update axis limits to prevent choppy scaling
+            % audioData can be a vector or matrix (columns = channels)
+            if isempty(audioData) || isempty(timeData)
+                return;
+            end
+            
+            % Use fixed Y-axis range for smoother updates
+            yRange = 1;
+            if ~isempty(app.YAxisRangeSlider) && isvalid(app.YAxisRangeSlider)
+                yRange = app.YAxisRangeSlider.Value;
+            end
+            newYMin = -yRange;
+            newYMax = yRange;
+            
+            % Set X limits (time axis)
+            xMin = min(timeData);
+            xMax = max(timeData);
+            if xMax - xMin < 0.001
+                xMax = xMin + 0.5; % Default to 0.5 seconds
+            end
+            
+            % Smooth X limits
+            currentXLim = ax.XLim;
+            if isempty(currentXLim) || any(isnan(currentXLim)) || currentXLim(1) == currentXLim(2)
+                newXMin = xMin;
+                newXMax = xMax;
+            else
+                newXMin = currentXLim(1) + (xMin - currentXLim(1)) * app.SmoothingFactor;
+                newXMax = currentXLim(2) + (xMax - currentXLim(2)) * app.SmoothingFactor;
+            end
+            
+            % Apply limits
+            ax.YLim = [newYMin, newYMax];
+            ax.XLim = [newXMin, newXMax];
+        end
+        
+        function updateSmoothAxisLimitsFFT(app, ax, freqData, magnitudeData)
+            % Smoothly update axis limits for FFT plots
+            if isempty(freqData) || isempty(magnitudeData)
+                return;
+            end
+            
+            % Use fixed Y-axis range for smoother updates
+            yRange = 1;
+            if ~isempty(app.YAxisRangeSlider) && isvalid(app.YAxisRangeSlider)
+                yRange = app.YAxisRangeSlider.Value;
+            end
+            yMin = 0;
+            yMax = yRange;
+            
+            xMin = min(freqData);
+            xMax = max(freqData);
+            if xMax - xMin < 1
+                xMax = xMin + 100; % Default to 100 Hz range
+            end
+            
+            % No smoothing for fixed limits
+            newYMin = yMin;
+            newYMax = yMax;
+            
+            currentXLim = ax.XLim;
+            if isempty(currentXLim) || any(isnan(currentXLim)) || currentXLim(1) == currentXLim(2)
+                newXMin = xMin;
+                newXMax = xMax;
+            else
+                newXMin = currentXLim(1) + (xMin - currentXLim(1)) * app.SmoothingFactor;
+                newXMax = currentXLim(2) + (xMax - currentXLim(2)) * app.SmoothingFactor;
+            end
+            
+            % Apply limits
+            ax.YLim = [newYMin, newYMax];
+            ax.XLim = [newXMin, newXMax];
+        end
+        
         function updateVisualization(app)
             if ~app.IsRunning
                 return;
@@ -1137,6 +2018,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             warning('off', 'all');
             
             try
+                colors = getThemeColors(app);
                 % Get audio data from recorders
                 audioData = [];
                 timeData = [];
@@ -1183,12 +2065,32 @@ classdef MicVisualizer < matlab.apps.AppBase
                                 
                                 % Accumulate in rolling history (keep ~0.5 seconds)
                                 maxHistorySamples = round(app.SampleRate * 0.5);
-                                for micIdx = 1:app.NumMics
-                                    % Append new frame
-                                    app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:)];
-                                    % Trim if too long
-                                    if length(app.AudioHistory{micIdx}) > maxHistorySamples
-                                        app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                                numChannels = size(frameData, 2);
+                                if numChannels <= 1 && app.NumMics > 1
+                                    % Duplicate single channel for multiple mic displays
+                                    for micIdx = 1:app.NumMics
+                                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:)];
+                                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
+                                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                                        end
+                                    end
+                                else
+                                    channelsToUse = min(app.NumMics, numChannels);
+                                    for micIdx = 1:channelsToUse
+                                        app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; frameData(:, micIdx)];
+                                        if length(app.AudioHistory{micIdx}) > maxHistorySamples
+                                            app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                                        end
+                                    end
+                                    if channelsToUse < app.NumMics && channelsToUse > 0
+                                        % Duplicate last available channel for remaining displays
+                                        lastChannel = frameData(:, channelsToUse);
+                                        for micIdx = (channelsToUse + 1):app.NumMics
+                                            app.AudioHistory{micIdx} = [app.AudioHistory{micIdx}; lastChannel];
+                                            if length(app.AudioHistory{micIdx}) > maxHistorySamples
+                                                app.AudioHistory{micIdx} = app.AudioHistory{micIdx}(end-maxHistorySamples+1:end);
+                                            end
+                                        end
                                     end
                                 end
                                 
@@ -1340,9 +2242,32 @@ classdef MicVisualizer < matlab.apps.AppBase
                 showWaveform = app.WaveformDisplayCheckBox.Value;
                 showFFT = app.FFTDisplayCheckBox.Value;
                 
-                % If neither is selected, default to waveform
+                % If neither is selected, clear plots and skip rendering
                 if ~showWaveform && ~showFFT
-                    showWaveform = true;
+                    if ~isempty(app.SplitAxes)
+                        for i = 1:numel(app.SplitAxes)
+                            if isvalid(app.SplitAxes{i})
+                                ax = app.SplitAxes{i};
+                                cla(ax);
+                                applyAxesTheme(app, ax);
+                                ax.Title.String = 'No display mode selected';
+                                ax.XLabel.String = '';
+                                ax.YLabel.String = '';
+                            end
+                        end
+                    end
+                    cla(app.MicAxes);
+                    applyAxesTheme(app, app.MicAxes);
+                    app.MicAxes.Title.String = 'No display mode selected';
+                    app.MicAxes.XLabel.String = '';
+                    app.MicAxes.YLabel.String = '';
+                    return;
+                end
+
+                if showWaveform
+                    waveformData = audioData - mean(audioData, 1);
+                else
+                    waveformData = audioData;
                 end
                 
                 % Determine which inputs to split
@@ -1370,11 +2295,12 @@ classdef MicVisualizer < matlab.apps.AppBase
                     if splitIdx <= length(app.SplitAxes) && isvalid(app.SplitAxes{splitIdx})
                         ax = app.SplitAxes{splitIdx};
                         cla(ax);
+                        applyAxesTheme(app, ax);
                         hold(ax, 'on');
                         
                         if showWaveform
-                            plot(ax, timeData, audioData(:, channelIdx), ...
-                                'Color', app.WVUGold, 'LineWidth', 1.5);
+                            plot(ax, timeData, waveformData(:, channelIdx), ...
+                                'Color', colors.Accent, 'LineWidth', 1.5);
                             ax.YLabel.String = 'Amplitude';
                             ax.XLabel.String = 'Time (s)';
                             ax.Title.String = sprintf('Input %d - Waveform', channelIdx);
@@ -1390,7 +2316,8 @@ classdef MicVisualizer < matlab.apps.AppBase
                                 f = app.SampleRate*(0:(N/2))/N;
                                 maxFreq = min(8000, app.SampleRate/2);
                                 idx = f <= maxFreq;
-                                plot(ax, f(idx), P1(idx), 'Color', app.WVUGold, 'LineWidth', 2);
+                                applyInitialFftRange(app, P1(idx));
+                                plot(ax, f(idx), P1(idx), 'Color', colors.Accent, 'LineWidth', 2);
                                 ax.YLabel.String = 'Magnitude';
                                 ax.XLabel.String = 'Frequency (Hz)';
                                 ax.Title.String = sprintf('Input %d - Frequency Spectrum', channelIdx);
@@ -1399,30 +2326,53 @@ classdef MicVisualizer < matlab.apps.AppBase
                         hold(ax, 'off');
                         ax.XGrid = 'on';
                         ax.YGrid = 'on';
+                        
+                        % Apply smooth axis scaling for split axes
+                        if showWaveform
+                            updateSmoothAxisLimits(app, ax, timeData, waveformData(:, channelIdx), false);
+                        elseif showFFT
+                            fftData = audioData(:, channelIdx);
+                            N = length(fftData);
+                            if N > 0
+                                windowed = fftData .* hann(N);
+                                Y = fft(windowed);
+                                P2 = abs(Y/N);
+                                P1 = P2(1:N/2+1);
+                                P1(2:end-1) = 2*P1(2:end-1);
+                                f = app.SampleRate*(0:(N/2))/N;
+                                maxFreq = min(8000, app.SampleRate/2);
+                                idx = f <= maxFreq;
+                                updateSmoothAxisLimitsFFT(app, ax, f(idx), P1(idx));
+                            end
+                        end
                     end
                 end
                 
                 % Plot combined inputs on main axes
                 if ~isempty(combinedIndices)
                     cla(app.MicAxes);
+                    applyAxesTheme(app, app.MicAxes);
                     hold(app.MicAxes, 'on');
                     
                     if showWaveform && ~showFFT
-                        colors = lines(length(combinedIndices));
+                        channelColors = getChannelColors(app, length(combinedIndices));
                         for i = 1:length(combinedIndices)
                             chIdx = combinedIndices(i);
-                            plot(app.MicAxes, timeData, audioData(:, chIdx), ...
-                                'Color', colors(i,:), 'LineWidth', 1.5, ...
+                            plot(app.MicAxes, timeData, waveformData(:, chIdx), ...
+                                'Color', channelColors(i,:), 'LineWidth', 1.5, ...
                                 'DisplayName', sprintf('Mic %d', chIdx));
                         end
                         app.MicAxes.YLabel.String = 'Amplitude';
                         app.MicAxes.XLabel.String = 'Time (s)';
                         app.MicAxes.Title.String = sprintf('Combined Waveform (%d Mic(s))', length(combinedIndices));
-                        legend(app.MicAxes, 'show', 'Location', 'best', 'TextColor', app.WVUGold);
+                        legend(app.MicAxes, 'show', 'Location', 'best');
+                        applyLegendTheme(app, app.MicAxes, colors);
                         
                     elseif showFFT && ~showWaveform
                         fftData = mean(audioData(:, combinedIndices), 2);
                         N = length(fftData);
+                        f = [];
+                        P1 = [];
                         if N > 0
                             windowed = fftData .* hann(N);
                             Y = fft(windowed);
@@ -1432,19 +2382,20 @@ classdef MicVisualizer < matlab.apps.AppBase
                             f = app.SampleRate*(0:(N/2))/N;
                             maxFreq = min(8000, app.SampleRate/2);
                             idx = f <= maxFreq;
+                            applyInitialFftRange(app, P1(idx));
                             plot(app.MicAxes, f(idx), P1(idx), ...
-                                'Color', app.WVUGold, 'LineWidth', 2);
+                                'Color', colors.Accent, 'LineWidth', 2);
                             app.MicAxes.YLabel.String = 'Magnitude';
                             app.MicAxes.XLabel.String = 'Frequency (Hz)';
                             app.MicAxes.Title.String = 'Combined Frequency Spectrum';
                         end
                         
                     elseif showWaveform && showFFT
-                        colors = lines(length(combinedIndices));
+                        channelColors = getChannelColors(app, length(combinedIndices));
                         for i = 1:length(combinedIndices)
                             chIdx = combinedIndices(i);
-                            plot(app.MicAxes, timeData, audioData(:, chIdx), ...
-                                'Color', colors(i,:), 'LineWidth', 1.5, ...
+                            plot(app.MicAxes, timeData, waveformData(:, chIdx), ...
+                                'Color', channelColors(i,:), 'LineWidth', 1.5, ...
                                 'DisplayName', sprintf('Mic %d', chIdx));
                         end
                         
@@ -1471,12 +2422,29 @@ classdef MicVisualizer < matlab.apps.AppBase
                         
                         app.MicAxes.YLabel.String = 'Amplitude';
                         app.MicAxes.XLabel.String = 'Time (s)';
-                        legend(app.MicAxes, 'show', 'Location', 'best', 'TextColor', app.WVUGold);
+                        legend(app.MicAxes, 'show', 'Location', 'best');
+                        applyLegendTheme(app, app.MicAxes, colors);
                     end
                     
                     hold(app.MicAxes, 'off');
                     app.MicAxes.XGrid = 'on';
                     app.MicAxes.YGrid = 'on';
+                    
+                    % Apply smooth axis scaling
+                    if showWaveform && ~showFFT
+                        % Waveform only
+                        updateSmoothAxisLimits(app, app.MicAxes, timeData, waveformData(:, combinedIndices), false);
+                    elseif showFFT && ~showWaveform
+                        % FFT only - use pre-calculated data
+                        if ~isempty(f) && ~isempty(P1)
+                            maxFreq = min(8000, app.SampleRate/2);
+                            idx = f <= maxFreq;
+                            updateSmoothAxisLimitsFFT(app, app.MicAxes, f(idx), P1(idx));
+                        end
+                    elseif showWaveform && showFFT
+                        % Both - scale for waveform (FFT is just shown in title)
+                        updateSmoothAxisLimits(app, app.MicAxes, timeData, waveformData(:, combinedIndices), false);
+                    end
                 end
                 
                 % Force update - suppress errors
@@ -1510,6 +2478,9 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Load saved preferences
             app.PrefsFilePath = app.getPrefsFilePath();
             loadPreferences(app);
+
+            % If FFT is enabled on startup (without waveform), set a one-time auto y-range
+            app.ApplyInitialFftRange = app.FFTDisplayCheckBox.Value && ~app.WaveformDisplayCheckBox.Value;
             
             % Don't initialize audio on startup - wait until user clicks Start
             % This prevents hanging if device is busy
@@ -1583,6 +2554,7 @@ classdef MicVisualizer < matlab.apps.AppBase
             end
 
             useDaq = checkDataAcqToolbox(app);
+            hasAudioToolbox = checkAudioToolbox(app);
             
             % Adjust SelectedDeviceIDs array if number of mics changed
             if ~useDaq && newNumMics ~= app.NumMics
@@ -1642,7 +2614,120 @@ classdef MicVisualizer < matlab.apps.AppBase
             if app.IsApplyingPrefs
                 return;
             end
+            updateGainLabel(app, app.GainSlider.Value);
             savePreferences(app);
+        end
+
+        function GainSliderValueChanging(app, event)
+            if isempty(event) || ~isprop(event, 'Value')
+                return;
+            end
+            updateGainLabel(app, event.Value);
+        end
+
+        function updateGainLabel(app, value)
+            if nargin < 2 || isempty(value)
+                value = app.GainSlider.Value;
+            end
+            if isempty(app.GainValueLabel) || ~isvalid(app.GainValueLabel)
+                return;
+            end
+            app.GainValueLabel.Text = sprintf('%.2f', value);
+        end
+
+        function applyInitialFftRange(app, magnitudeData)
+            if ~app.ApplyInitialFftRange
+                return;
+            end
+            if isempty(magnitudeData)
+                return;
+            end
+            magnitudeData = magnitudeData(isfinite(magnitudeData));
+            if isempty(magnitudeData)
+                return;
+            end
+            maxMag = max(magnitudeData);
+            if isempty(maxMag) || maxMag <= 0
+                return;
+            end
+            if isempty(app.YAxisRangeSlider) || ~isvalid(app.YAxisRangeSlider)
+                return;
+            end
+            limits = app.YAxisRangeSlider.Limits;
+            yRange = maxMag * 1.5;
+            yRange = max(limits(1), min(limits(2), yRange));
+            app.IsApplyingPrefs = true;
+            app.YAxisRangeSlider.Value = yRange;
+            updateYAxisRangeLabel(app, yRange);
+            app.IsApplyingPrefs = false;
+            app.ApplyInitialFftRange = false;
+        end
+
+        function updateYAxisRangeLabel(app, value)
+            if nargin < 2 || isempty(value)
+                value = app.YAxisRangeSlider.Value;
+            end
+            if isempty(app.YAxisRangeValueLabel) || ~isvalid(app.YAxisRangeValueLabel)
+                return;
+            end
+            app.YAxisRangeValueLabel.Text = sprintf('%.2f', value);
+        end
+
+        function applyFixedYAxisLimits(app, yRange)
+            if nargin < 2 || isempty(yRange)
+                yRange = app.YAxisRangeSlider.Value;
+            end
+            if isempty(app.MicAxes) || ~isvalid(app.MicAxes)
+                return;
+            end
+            app.MicAxes.YLim = [-yRange, yRange];
+            if ~isempty(app.SplitAxes)
+                for i = 1:numel(app.SplitAxes)
+                    if ~isempty(app.SplitAxes{i}) && isvalid(app.SplitAxes{i})
+                        app.SplitAxes{i}.YLim = [-yRange, yRange];
+                    end
+                end
+            end
+        end
+
+        function setControlsForRunning(app, isRunning)
+            if isempty(app.UIFigure) || ~isvalid(app.UIFigure)
+                return;
+            end
+            state = 'on';
+            if isRunning
+                state = 'off';
+            end
+            if ~isempty(app.NumMicsSpinner) && isvalid(app.NumMicsSpinner)
+                app.NumMicsSpinner.Enable = state;
+            end
+            if ~isempty(app.SampleRateSpinner) && isvalid(app.SampleRateSpinner)
+                app.SampleRateSpinner.Enable = state;
+            end
+            if ~isempty(app.SelectInputsButton) && isvalid(app.SelectInputsButton)
+                app.SelectInputsButton.Enable = state;
+            end
+            if ~isempty(app.SplitGraphsButton) && isvalid(app.SplitGraphsButton)
+                app.SplitGraphsButton.Enable = state;
+            end
+        end
+
+        function YAxisRangeSliderValueChanged(app, event)
+            %#ok<INUSD>
+            if app.IsApplyingPrefs
+                return;
+            end
+            yRange = app.YAxisRangeSlider.Value;
+            updateYAxisRangeLabel(app, yRange);
+            applyFixedYAxisLimits(app, yRange);
+            savePreferences(app);
+        end
+
+        function YAxisRangeSliderValueChanging(app, event)
+            if isempty(event) || ~isprop(event, 'Value')
+                return;
+            end
+            updateYAxisRangeLabel(app, event.Value);
         end
 
         function DisplayOptionValueChanged(app, event)
@@ -1650,17 +2735,61 @@ classdef MicVisualizer < matlab.apps.AppBase
             if app.IsApplyingPrefs
                 return;
             end
+            if ~isempty(event) && isprop(event, 'Source')
+                updateDisplayOptionState(app, event.Source);
+            else
+                updateDisplayOptionState(app, []);
+            end
+            savePreferences(app);
+        end
+
+        function DarkModeSwitchValueChanged(app, event)
+            %#ok<INUSD>
+            if app.IsApplyingPrefs
+                return;
+            end
+            app.UseDarkMode = strcmpi(app.DarkModeSwitch.Value, 'Dark');
+            applyTheme(app);
             savePreferences(app);
         end
         
         % Button pushed function: SelectInputsButton
         function SelectInputsButtonPushed(app, event)
+            % Allow UI to update before showing dialog
+            drawnow;
             showInputDeviceDialog(app);
         end
         
         % Button pushed function: SplitGraphsButton
         function SplitGraphsButtonPushed(app, event)
+            % Allow UI to update before showing dialog
+            drawnow;
             showSplitGraphsDialog(app);
+        end
+
+        % Button pushed function: FullscreenButton
+        function FullscreenButtonPushed(app, event)
+            %#ok<INUSD>
+            if isempty(app.UIFigure) || ~isvalid(app.UIFigure)
+                return;
+            end
+            if isprop(app.UIFigure, 'WindowState') && strcmpi(app.UIFigure.WindowState, 'fullscreen')
+                app.UIFigure.WindowState = 'normal';
+                app.FullscreenButton.Text = 'Fullscreen';
+                return;
+            end
+            try
+                app.UIFigure.WindowState = 'fullscreen';
+                app.FullscreenButton.Text = 'Exit Fullscreen';
+            catch
+                try
+                    app.UIFigure.WindowState = 'maximized';
+                    app.FullscreenButton.Text = 'Exit Fullscreen';
+                catch
+                    app.UIFigure.WindowState = 'normal';
+                    app.FullscreenButton.Text = 'Fullscreen';
+                end
+            end
         end
         
         function showInputDeviceDialog(app)
@@ -1671,37 +2800,66 @@ classdef MicVisualizer < matlab.apps.AppBase
             micHeight = 35;
             dialogHeight = min(600, baseHeight + numMics * micHeight); % Cap at 600px
             useDaq = checkDataAcqToolbox(app);
+            hasAudioToolbox = checkAudioToolbox(app);
+            colors = getThemeColors(app);
             
             dialogFig = uifigure('Visible', 'off');
             dialogFig.Position = [400 300 500 dialogHeight];
             dialogFig.Name = 'Select Audio Input Devices';
-            dialogFig.Color = app.WVUBlue;
+            dialogFig.Color = colors.Window;
             dialogFig.Resize = 'off';
+            applyDialogIcon(app, dialogFig);
             
             % Main panel
             mainPanel = uipanel(dialogFig);
-            mainPanel.BackgroundColor = app.WVUBlueLight;
+            mainPanel.BackgroundColor = colors.PanelAlt;
             mainPanel.Position = [10 10 480 dialogHeight-20];
+            mainPanel.BorderType = 'line';
+            if isprop(mainPanel, 'BorderColor')
+                mainPanel.BorderColor = colors.Border;
+            end
             
             % Title
             titleLabel = uilabel(mainPanel);
             titleLabel.Text = 'Select Input Device for Each Microphone';
-            titleLabel.FontName = 'Helvetica Neue';
+            titleLabel.FontName = app.AppFontName;
             titleLabel.FontSize = 16;
             titleLabel.FontWeight = 'bold';
-            titleLabel.FontColor = app.WVUGold;
+            titleLabel.FontColor = colors.Text;
             titleLabel.Position = [20 dialogHeight-50 440 30];
             titleLabel.HorizontalAlignment = 'center';
+
+            % Note about multi-channel USB interfaces without Audio Toolbox/DAQ
+            if ~useDaq && ~hasAudioToolbox
+                noteLabel = uilabel(mainPanel);
+                noteLabel.Text = ['Audio Toolbox not detected. Multi-channel USB interfaces ' ...
+                    '(e.g., UMC404HD) may not appear without Audio Toolbox or Data Acquisition Toolbox.'];
+                noteLabel.FontName = app.AppFontName;
+                noteLabel.FontSize = 10;
+                noteLabel.FontColor = colors.TextMuted;
+                noteLabel.Position = [20 dialogHeight-105 440 40];
+                noteLabel.HorizontalAlignment = 'center';
+                noteLabel.WordWrap = 'on';
+            end
             
             % Refresh button
             refreshBtn = uibutton(mainPanel, 'push');
             refreshBtn.Text = 'Refresh Devices';
-            refreshBtn.FontName = 'Helvetica Neue';
+            refreshBtn.FontName = app.AppFontName;
             refreshBtn.FontSize = 10;
             refreshBtn.FontWeight = 'bold';
-            refreshBtn.BackgroundColor = app.WVUGold;
-            refreshBtn.FontColor = app.WVUBlue;
+            refreshBtn.BackgroundColor = colors.ButtonSecondary;
+            refreshBtn.FontColor = colors.ButtonSecondaryText;
             refreshBtn.Position = [20 dialogHeight-80 120 25];
+
+            % Device summary label (updated on refresh)
+            deviceSummaryLabel = uilabel(mainPanel);
+            deviceSummaryLabel.Text = 'Detecting devices...';
+            deviceSummaryLabel.FontName = app.AppFontName;
+            deviceSummaryLabel.FontSize = 10;
+            deviceSummaryLabel.FontColor = colors.Text;
+            deviceSummaryLabel.Position = [160 dialogHeight-82 280 22];
+            deviceSummaryLabel.HorizontalAlignment = 'left';
             
             % Create dropdowns for each microphone (will be populated by refresh function)
             numMics = app.NumMics;
@@ -1716,6 +2874,9 @@ classdef MicVisualizer < matlab.apps.AppBase
                 deviceNames = {};
                 deviceIDs = [];
                 deviceVendors = {};
+                deviceDrivers = {};
+                useAudioToolboxList = false;
+                useDaqList = useDaq;
 
                 if useDaq
                     % Prefer DAQ device list when available
@@ -1737,17 +2898,100 @@ classdef MicVisualizer < matlab.apps.AppBase
                         end
                     catch
                     end
+                    % If DAQ has no devices, fall back to Audio Toolbox list
+                    if isempty(deviceNames) && hasAudioToolbox && exist('getAudioDevices', 'file') == 2
+                        try
+                            % Prefer ASIO, then WASAPI/DirectSound
+                            driversToTry = ["ASIO", "WASAPI", "DirectSound"];
+                            for d = driversToTry
+                                try
+                                    r = audioDeviceReader('Driver', char(d));
+                                    devs = getAudioDevices(r);
+                                    release(r);
+                                    if ~isempty(devs)
+                                        for k = 1:numel(devs)
+                                            deviceNames{end+1,1} = devs{k};
+                                            deviceDrivers{end+1,1} = char(d);
+                                        end
+                                        useAudioToolboxList = true;
+                                    end
+                                catch
+                                end
+                                if useAudioToolboxList
+                                    break;
+                                end
+                            end
+                            if ~useAudioToolboxList
+                                devs = getAudioDevices;
+                                if ~isempty(devs)
+                                    deviceNames = devs(:);
+                                    deviceDrivers = repmat({''}, numel(devs), 1);
+                                    useAudioToolboxList = true;
+                                end
+                            end
+                        catch
+                            deviceNames = {};
+                        end
+                    end
+                    % If still empty, fall back to legacy list
+                    if isempty(deviceNames) && ~useAudioToolboxList
+                        try
+                            info = audiodevinfo;
+                            inputDevices = info.input;
+                        catch
+                            inputDevices = [];
+                        end
+                    end
                 else
-                    % Legacy device list
-                    try
-                        info = audiodevinfo;
-                        inputDevices = info.input;
-                    catch
-                        inputDevices = [];
+                    if hasAudioToolbox && exist('getAudioDevices', 'file') == 2
+                        % Audio Toolbox device list (includes multi-channel interfaces)
+                        try
+                            driversToTry = ["ASIO", "WASAPI", "DirectSound"];
+                            for d = driversToTry
+                                try
+                                    r = audioDeviceReader('Driver', char(d));
+                                    devs = getAudioDevices(r);
+                                    release(r);
+                                    if ~isempty(devs)
+                                        for k = 1:numel(devs)
+                                            deviceNames{end+1,1} = devs{k};
+                                            deviceDrivers{end+1,1} = char(d);
+                                        end
+                                        useAudioToolboxList = true;
+                                    end
+                                catch
+                                end
+                                if useAudioToolboxList
+                                    break;
+                                end
+                            end
+                            if ~useAudioToolboxList
+                                devs = getAudioDevices;
+                                if ~isempty(devs)
+                                    deviceNames = devs(:);
+                                    deviceDrivers = repmat({''}, numel(devs), 1);
+                                    useAudioToolboxList = true;
+                                end
+                            end
+                        catch
+                            deviceNames = {};
+                        end
+                    end
+                    if ~useAudioToolboxList
+                        % Legacy device list
+                        try
+                            info = audiodevinfo;
+                            inputDevices = info.input;
+                        catch
+                            inputDevices = [];
+                        end
                     end
                 end
                 
-                if ~useDaq && ~isempty(inputDevices)
+                useDaqList = useDaq && ~useAudioToolboxList;
+                if ~useAudioToolboxList && ~isempty(inputDevices)
+                    % Use legacy device list (even if DAQ toolbox is present)
+                    useDaqList = false;
                     deviceNames = cell(length(inputDevices), 1);
                     deviceIDs = zeros(length(inputDevices), 1);
                     for i = 1:length(inputDevices)
@@ -1757,6 +3001,15 @@ classdef MicVisualizer < matlab.apps.AppBase
                 end
 
                 if isempty(deviceNames)
+                    if isvalid(deviceSummaryLabel)
+                        if useDaq
+                            deviceSummaryLabel.Text = 'No DAQ audio devices detected';
+                        elseif useAudioToolboxList
+                            deviceSummaryLabel.Text = 'No Audio Toolbox devices detected';
+                        else
+                            deviceSummaryLabel.Text = 'No legacy audio devices detected';
+                        end
+                    end
                     % Hide all dropdowns and labels, show error
                     for i = 1:numMics
                         if ~isempty(labels{i}) && isvalid(labels{i})
@@ -1772,11 +3025,16 @@ classdef MicVisualizer < matlab.apps.AppBase
                     if isempty(errorLabels)
                         errorLabel = uilabel(mainPanel);
                         errorLabel.Tag = 'ErrorLabel';
-                        errorLabel.Text = 'No audio input devices found. Plug in a microphone and click Refresh.';
-                        errorLabel.FontName = 'Helvetica Neue';
+                        if ~hasAudioToolbox && ~useDaq
+                            errorLabel.Text = ['No audio input devices found. Some interfaces (ASIO) are not visible without ' ...
+                                'Audio Toolbox or Data Acquisition Toolbox.'];
+                        else
+                            errorLabel.Text = 'No audio input devices found. Plug in a microphone and click Refresh.';
+                        end
+                        errorLabel.FontName = app.AppFontName;
                         errorLabel.FontSize = 12;
-                        errorLabel.FontColor = [1 0.5 0.5];
-                        errorLabel.Position = [20 200 440 60];
+                    errorLabel.FontColor = colors.Danger;
+                        errorLabel.Position = [20 max(60, dialogHeight-180) 440 60];
                         errorLabel.HorizontalAlignment = 'center';
                         errorLabel.WordWrap = 'on';
                     else
@@ -1790,12 +3048,41 @@ classdef MicVisualizer < matlab.apps.AppBase
                 if ~isempty(errorLabels)
                     errorLabels.Visible = 'off';
                 end
+                if isvalid(deviceSummaryLabel)
+                    if useAudioToolboxList
+                        deviceSummaryLabel.Text = sprintf('Audio Toolbox devices detected: %d', length(deviceNames));
+                    elseif useDaq
+                        deviceSummaryLabel.Text = sprintf('DAQ devices detected: %d', length(deviceNames));
+                    else
+                        deviceSummaryLabel.Text = sprintf('Legacy devices detected: %d', length(deviceNames));
+                    end
+                end
                 
-                if useDaq
+                if useDaqList
                     % DAQ only supports one stream; show one dropdown and hide others
                     if isempty(app.SelectedDataAcqDeviceId) && ~isempty(deviceIDs)
                         app.SelectedDataAcqDeviceId = deviceIDs{1};
                         app.SelectedDataAcqVendor = deviceVendors{1};
+                    end
+                elseif useAudioToolboxList
+                    % Initialize selected device names if empty
+                    if isempty(app.SelectedDeviceNames) || length(app.SelectedDeviceNames) < numMics
+                        app.SelectedDeviceNames = cell(numMics, 1);
+                        for i = 1:min(numMics, length(deviceNames))
+                            app.SelectedDeviceNames{i} = deviceNames{i};
+                        end
+                        % Fill remaining with first device
+                        if numMics > length(deviceNames) && ~isempty(deviceNames)
+                            for i = length(deviceNames)+1:numMics
+                                app.SelectedDeviceNames{i} = deviceNames{1};
+                            end
+                        end
+                    end
+                    if isempty(app.SelectedAudioDeviceName) && ~isempty(deviceNames)
+                        app.SelectedAudioDeviceName = deviceNames{1};
+                    end
+                    if isempty(app.SelectedAudioDriver) && ~isempty(deviceDrivers)
+                        app.SelectedAudioDriver = deviceDrivers{1};
                     end
                 else
                     % Initialize selected device IDs if empty
@@ -1818,18 +3105,18 @@ classdef MicVisualizer < matlab.apps.AppBase
                     % Create label if it doesn't exist
                     if isempty(labels{i}) || ~isvalid(labels{i})
                         labels{i} = uilabel(mainPanel);
-                        if useDaq && i == 1
+                        if useDaqList && i == 1
                             labels{i}.Text = 'Audio Input Device:';
                         else
                             labels{i}.Text = sprintf('Microphone %d:', i);
                         end
-                        labels{i}.FontName = 'Helvetica Neue';
+                        labels{i}.FontName = app.AppFontName;
                         labels{i}.FontSize = 11;
-                        labels{i}.FontColor = app.WVUGold;
+                        labels{i}.FontColor = colors.Text;
                         labels{i}.Position = [30 startY - (i-1)*spacing 120 22];
                         labels{i}.HorizontalAlignment = 'left';
                     end
-                    if useDaq && i > 1
+                    if useDaqList && i > 1
                         labels{i}.Visible = 'off';
                     else
                         labels{i}.Visible = 'on';
@@ -1838,21 +3125,27 @@ classdef MicVisualizer < matlab.apps.AppBase
                     % Create or update dropdown
                     if isempty(dropdowns{i}) || ~isvalid(dropdowns{i})
                         dropdowns{i} = uidropdown(mainPanel);
-                        dropdowns{i}.FontName = 'Helvetica Neue';
+                        dropdowns{i}.FontName = app.AppFontName;
                         dropdowns{i}.FontSize = 11;
                         dropdowns{i}.Position = [160 startY - (i-1)*spacing 280 22];
+                        if isprop(dropdowns{i}, 'FontColor')
+                            dropdowns{i}.FontColor = colors.Text;
+                        end
+                        if isprop(dropdowns{i}, 'BackgroundColor')
+                            dropdowns{i}.BackgroundColor = colors.Panel;
+                        end
                     end
                     
                     % Update dropdown items with fresh device list
                     dropdowns{i}.Items = deviceNames;
-                    if useDaq && i > 1
+                    if useDaqList && i > 1
                         dropdowns{i}.Visible = 'off';
                     else
                         dropdowns{i}.Visible = 'on';
                     end
                     
                     % Set current selection (try to preserve if device still exists)
-                    if useDaq
+                    if useDaqList
                         currentID = app.SelectedDataAcqDeviceId;
                         idx = find(strcmp(deviceIDs, currentID), 1);
                         if ~isempty(idx)
@@ -1862,6 +3155,21 @@ classdef MicVisualizer < matlab.apps.AppBase
                                 dropdowns{i}.Value = deviceNames{1};
                                 app.SelectedDataAcqDeviceId = deviceIDs{1};
                                 app.SelectedDataAcqVendor = deviceVendors{1};
+                            end
+                        end
+                    elseif useAudioToolboxList
+                        if length(app.SelectedDeviceNames) >= i && ~isempty(app.SelectedDeviceNames{i})
+                            currentName = app.SelectedDeviceNames{i};
+                        else
+                            currentName = '';
+                        end
+                        idx = find(strcmp(deviceNames, currentName), 1);
+                        if ~isempty(idx)
+                            dropdowns{i}.Value = deviceNames{idx};
+                        else
+                            if ~isempty(deviceNames)
+                                dropdowns{i}.Value = deviceNames{1};
+                                app.SelectedDeviceNames{i} = deviceNames{1};
                             end
                         end
                     else
@@ -1881,8 +3189,10 @@ classdef MicVisualizer < matlab.apps.AppBase
                     % Store device ID when changed - use a callback that looks up from current items
                     % This ensures it works even after refresh
                     micIdx = i; % Capture loop variable
-                    if useDaq
+                    if useDaqList
                         dropdowns{i}.ValueChangedFcn = @(src,~) updateDataAcqSelectionFromDropdown(app, src, deviceNames, deviceIDs, deviceVendors);
+                    elseif useAudioToolboxList
+                        dropdowns{i}.ValueChangedFcn = @(src,~) updateDeviceNameFromDropdown(app, micIdx, src, deviceNames, deviceDrivers);
                     else
                         dropdowns{i}.ValueChangedFcn = @(src,~) updateDeviceIDFromDropdown(app, micIdx, src);
                     end
@@ -1898,20 +3208,20 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Buttons
             okBtn = uibutton(mainPanel, 'push');
             okBtn.Text = 'OK';
-            okBtn.FontName = 'Helvetica Neue';
+            okBtn.FontName = app.AppFontName;
             okBtn.FontSize = 12;
             okBtn.FontWeight = 'bold';
-            okBtn.BackgroundColor = [0.2 0.6 0.2];
+            okBtn.BackgroundColor = colors.Success;
             okBtn.FontColor = [1 1 1];
             okBtn.Position = [150 30 100 35];
             okBtn.ButtonPushedFcn = @(~,~) closeDialog(app, dialogFig);
             
             cancelBtn = uibutton(mainPanel, 'push');
             cancelBtn.Text = 'Cancel';
-            cancelBtn.FontName = 'Helvetica Neue';
+            cancelBtn.FontName = app.AppFontName;
             cancelBtn.FontSize = 12;
             cancelBtn.FontWeight = 'bold';
-            cancelBtn.BackgroundColor = [0.6 0.2 0.2];
+            cancelBtn.BackgroundColor = colors.Danger;
             cancelBtn.FontColor = [1 1 1];
             cancelBtn.Position = [270 30 100 35];
             cancelBtn.ButtonPushedFcn = @(~,~) delete(dialogFig);
@@ -1945,10 +3255,33 @@ classdef MicVisualizer < matlab.apps.AppBase
                         idStr = deviceStr(idStart(1)+5:idStart(1)+4+idEnd(1)-1);
                         deviceID = str2double(idStr);
                         if ~isnan(deviceID)
+                            % Stop visualization if running when device changes
+                            if app.IsRunning
+                                stopVisualization(app);
+                                app.StatusLabel.Text = 'Status: Stopped - Device selection changed. Click Start to begin.';
+                            end
                             app.SelectedDeviceIDs(micIndex) = deviceID;
                         end
                     end
                 end
+            end
+        end
+
+        function updateDeviceNameFromDropdown(app, micIndex, dropdown, deviceNames, deviceDrivers)
+            % Update Audio Toolbox device name selection
+            selectedName = dropdown.Value;
+            if app.IsRunning
+                stopVisualization(app);
+                app.StatusLabel.Text = 'Status: Stopped - Device selection changed. Click Start to begin.';
+            end
+            if isempty(app.SelectedDeviceNames) || length(app.SelectedDeviceNames) < micIndex
+                app.SelectedDeviceNames = cell(max(micIndex, app.NumMics), 1);
+            end
+            app.SelectedDeviceNames{micIndex} = selectedName;
+            idx = find(strcmp(deviceNames, selectedName), 1);
+            if ~isempty(idx) && length(deviceDrivers) >= idx
+                app.SelectedAudioDeviceName = selectedName;
+                app.SelectedAudioDriver = deviceDrivers{idx};
             end
         end
 
@@ -1957,18 +3290,27 @@ classdef MicVisualizer < matlab.apps.AppBase
             selectedName = dropdown.Value;
             idx = find(strcmp(deviceNames, selectedName), 1);
             if ~isempty(idx)
+                % Stop visualization if running when device changes
+                if app.IsRunning
+                    stopVisualization(app);
+                    app.StatusLabel.Text = 'Status: Stopped - Device selection changed. Click Start to begin.';
+                end
                 app.SelectedDataAcqDeviceId = deviceIDs{idx};
                 app.SelectedDataAcqVendor = deviceVendors{idx};
             end
         end
         
         function closeDialog(app, dialogFig)
+            % Stop visualization if running when device selection changes
+            if app.IsRunning
+                stopVisualization(app);
+                app.StatusLabel.Text = 'Status: Stopped - Device selection changed. Click Start to begin.';
+            end
+            
             % Reinitialize audio recorders with new device selections
+            initializeAudioRecorders(app);
             if ~app.IsRunning
-                initializeAudioRecorders(app);
                 app.StatusLabel.Text = sprintf('Status: Devices configured for %d microphone(s)', app.NumMics);
-            else
-                app.StatusLabel.Text = 'Status: Device changes will take effect after restart';
             end
             savePreferences(app);
             delete(dialogFig);
@@ -1978,25 +3320,31 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Create dialog for selecting which inputs to split onto separate graphs
             numMics = app.NumMics;
             dialogHeight = min(500, 150 + numMics * 30);
+            colors = getThemeColors(app);
             
             dialogFig = uifigure('Visible', 'off');
             dialogFig.Position = [400 300 400 dialogHeight];
             dialogFig.Name = 'Configure Split Graphs';
-            dialogFig.Color = app.WVUBlue;
+            dialogFig.Color = colors.Window;
             dialogFig.Resize = 'off';
+            applyDialogIcon(app, dialogFig);
             
             % Main panel
             mainPanel = uipanel(dialogFig);
-            mainPanel.BackgroundColor = app.WVUBlueLight;
+            mainPanel.BackgroundColor = colors.PanelAlt;
             mainPanel.Position = [10 10 380 dialogHeight-20];
+            mainPanel.BorderType = 'line';
+            if isprop(mainPanel, 'BorderColor')
+                mainPanel.BorderColor = colors.Border;
+            end
             
             % Title
             titleLabel = uilabel(mainPanel);
             titleLabel.Text = 'Select Inputs to Display on Separate Graphs';
-            titleLabel.FontName = 'Helvetica Neue';
+            titleLabel.FontName = app.AppFontName;
             titleLabel.FontSize = 14;
             titleLabel.FontWeight = 'bold';
-            titleLabel.FontColor = app.WVUGold;
+            titleLabel.FontColor = colors.Text;
             titleLabel.Position = [20 dialogHeight-60 340 30];
             titleLabel.HorizontalAlignment = 'center';
             
@@ -2008,9 +3356,9 @@ classdef MicVisualizer < matlab.apps.AppBase
             for i = 1:numMics
                 checkboxes{i} = uicheckbox(mainPanel);
                 checkboxes{i}.Text = sprintf('Split Input %d', i);
-                checkboxes{i}.FontName = 'Helvetica Neue';
+                checkboxes{i}.FontName = app.AppFontName;
                 checkboxes{i}.FontSize = 11;
-                checkboxes{i}.FontColor = app.WVUGold;
+                checkboxes{i}.FontColor = colors.Text;
                 checkboxes{i}.Value = app.SplitInputs(i);
                 checkboxes{i}.Position = [40 startY - (i-1)*spacing 200 22];
                 
@@ -2022,20 +3370,20 @@ classdef MicVisualizer < matlab.apps.AppBase
             % Buttons
             okBtn = uibutton(mainPanel, 'push');
             okBtn.Text = 'OK';
-            okBtn.FontName = 'Helvetica Neue';
+            okBtn.FontName = app.AppFontName;
             okBtn.FontSize = 12;
             okBtn.FontWeight = 'bold';
-            okBtn.BackgroundColor = [0.2 0.6 0.2];
+            okBtn.BackgroundColor = colors.Success;
             okBtn.FontColor = [1 1 1];
             okBtn.Position = [120 30 100 35];
             okBtn.ButtonPushedFcn = @(~,~) closeSplitDialog(app, dialogFig);
             
             cancelBtn = uibutton(mainPanel, 'push');
             cancelBtn.Text = 'Cancel';
-            cancelBtn.FontName = 'Helvetica Neue';
+            cancelBtn.FontName = app.AppFontName;
             cancelBtn.FontSize = 12;
             cancelBtn.FontWeight = 'bold';
-            cancelBtn.BackgroundColor = [0.6 0.2 0.2];
+            cancelBtn.BackgroundColor = colors.Danger;
             cancelBtn.FontColor = [1 1 1];
             cancelBtn.Position = [240 30 100 35];
             cancelBtn.ButtonPushedFcn = @(~,~) delete(dialogFig);
@@ -2103,14 +3451,8 @@ classdef MicVisualizer < matlab.apps.AppBase
                     
                     ax = uiaxes(app.VisualizerPanel);
                     ax.Position = [xPos yPos axWidth axHeight];
-                    ax.BackgroundColor = [0.05 0.05 0.1];
-                    ax.XColor = app.WVUGold;
-                    ax.YColor = app.WVUGold;
-                    ax.GridColor = app.WVUGold * 0.5;
-                    ax.GridAlpha = 0.3;
-                    ax.XGrid = 'on';
-                    ax.YGrid = 'on';
-                    ax.FontName = 'Helvetica Neue';
+                    ax.FontName = app.AppFontName;
+                    applyAxesTheme(app, ax);
                     
                     app.SplitAxes{splitIdx} = ax;
                     splitIdx = splitIdx + 1;
@@ -2123,11 +3465,24 @@ classdef MicVisualizer < matlab.apps.AppBase
         
         % Button pushed function: StartButton
         function StartButtonPushed(app, event)
-            startVisualization(app);
+            % Disable button immediately to show responsiveness
+            app.StartButton.Enable = 'off';
+            drawnow; % Allow UI to update immediately
+            try
+                startVisualization(app);
+            catch ME
+                % Re-enable button on error
+                app.StartButton.Enable = 'on';
+                drawnow;
+                rethrow(ME);
+            end
         end
         
         % Button pushed function: StopButton
         function StopButtonPushed(app, event)
+            % Disable button immediately to show responsiveness
+            app.StopButton.Enable = 'off';
+            drawnow; % Allow UI to update immediately
             stopVisualization(app);
         end
         

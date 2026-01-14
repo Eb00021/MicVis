@@ -1,3 +1,4 @@
+%% 
 % WVU EcoCAR EV Challenge - Microphone Audio Visualizer Launcher
 % This script launches the microphone audio visualizer application
 %
@@ -11,7 +12,21 @@ close all;
 % Check for required toolboxes (informational only)
 % Note: The application uses audiorecorder which is part of core MATLAB
 % Audio Toolbox is not strictly required, but may provide additional features
-if license('test', 'Audio_Toolbox')
+hasAudioToolbox = false;
+try
+    hasAudioToolbox = license('test', 'Audio_Toolbox');
+catch
+end
+if ~hasAudioToolbox
+    try
+        hasAudioToolbox = ~isempty(ver('audio'));
+    catch
+    end
+end
+if ~hasAudioToolbox
+    hasAudioToolbox = exist('audioDeviceReader', 'class') == 8 || exist('audioDeviceReader', 'file') == 2;
+end
+if hasAudioToolbox
     fprintf('Audio Toolbox detected - full functionality available\n');
 else
     fprintf('Note: Audio Toolbox not detected, but core functionality will work\n');
